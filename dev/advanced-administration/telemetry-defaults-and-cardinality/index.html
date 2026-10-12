@@ -3854,6 +3854,7 @@
 <p>Operators who need per-user billing data enable the <code>user</code> label explicitly, accepting the cardinality cost.</p>
 <h3 id="option-2-move-high-cardinality-data-to-logs">Option 2: Move High-Cardinality Data to Logs</h3>
 <p>Instead of encoding <code>user</code>, <code>organization_id</code>, and <code>cost_center</code> as metric labels (which create time series), emit them as structured log entries. Logs can be aggregated and queried via log analytics (e.g., OpenShift Logging, Loki) without creating Prometheus cardinality pressure.</p>
+<p>Usage logs include <code>organization_id</code> by default when that field is set on the subscription (<code>logs.captureOrganization</code> defaults to <code>true</code>). Set it to <code>false</code> to omit. That is independent of <code>metrics.captureOrganization</code>. <code>cost_center</code> is included when that field is set on the subscription.</p>
 <p>Metrics remain for aggregated operational visibility (per-model, per-tier). Logs handle per-user attribution and billing queries.</p>
 <h3 id="option-3-enforce-hard-limits-on-label-values">Option 3: Enforce Hard Limits on Label Values</h3>
 <p>Add controller-side validation that caps the number of unique values for each label dimension. For example, reject TelemetryPolicy configurations that would produce more than a configurable cardinality budget. This makes the worst-case series count predictable.</p>
@@ -3945,7 +3946,7 @@
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="July 24, 2026 16:23:16 UTC">July 24, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 12, 2026 12:12:18 UTC">October 12, 2026</span>
   </span>
 
     
