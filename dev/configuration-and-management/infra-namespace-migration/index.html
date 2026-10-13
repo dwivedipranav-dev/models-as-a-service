@@ -3543,7 +3543,7 @@
 <h1 id="infrastructure-namespace-separation">Infrastructure Namespace Separation</h1>
 <h2 id="overview">Overview</h2>
 <p>MaaS separates infrastructure services (maas-api deployment and maas-db-config secret) from controller components into dedicated namespaces <strong>by default</strong>.</p>
-<p><strong>Note:</strong> PostgreSQL itself can be external (e.g., AWS RDS, Azure Database). Only the maas-api deployment and the database connection secret (<code>maas-db-config</code>) move to the infrastructure namespace.</p>
+<p><strong>Note:</strong> PostgreSQL itself can be external (e.g., AWS RDS, Azure Database) or shared in another namespace. Only the maas-api deployment and the database connection secret (<code>maas-db-config</code>) move to the infrastructure namespace. Operand egress for <code>maas-api</code> allows all outbound database traffic by default; restrict peers via <code>maasconfig/default</code> — see <a href="../../install/maas-setup/#postgresql-egress">PostgreSQL egress</a>.</p>
 <p>For details on the full namespace architecture, see <a href="../../architecture-internals/controller-architecture/">Controller Architecture</a>.</p>
 <h2 id="default-behavior-namespace-separation-enabled">Default Behavior (Namespace Separation Enabled)</h2>
 <p>By default, MaaS automatically derives the infrastructure namespace from the controller namespace:</p>
@@ -3662,7 +3662,7 @@ controller-namespace copy will cause maas-api to crash-loop with authentication 
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="July 16, 2026 18:08:50 UTC">July 16, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 13, 2026 22:53:29 UTC">October 13, 2026</span>
   </span>
 
     
