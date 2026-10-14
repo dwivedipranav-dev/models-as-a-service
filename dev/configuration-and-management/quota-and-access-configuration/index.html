@@ -1732,6 +1732,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#model-server-must-include-usage-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Model server must include usage data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#4-validate-the-configuration" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1797,6 +1808,17 @@
     <span class="md-ellipsis">
       
         Model not appearing in GET /v1/models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#token-rate-limits-not-enforced-no-429-errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Token rate limits not enforced (no 429 errors)
       
     </span>
   </a>
@@ -3454,6 +3476,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#model-server-must-include-usage-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Model server must include usage data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#4-validate-the-configuration" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3519,6 +3552,17 @@
     <span class="md-ellipsis">
       
         Model not appearing in GET /v1/models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#token-rate-limits-not-enforced-no-429-errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Token rate limits not enforced (no 429 errors)
       
     </span>
   </a>
@@ -3724,6 +3768,12 @@
 <p>Limitador counts tokens using the <code>usage.total_tokens</code> field in the response body. OpenAI Chat Completions and Embeddings responses both include this field. Embedding requests consume <strong>prompt tokens only</strong> (no completion tokens); these count toward the same subscription token budget as chat completions. Anthropic Messages and OpenAI Responses report usage differently (<code>input_tokens</code>/<code>output_tokens</code> without <code>total_tokens</code>), so the rate limiting integration cannot extract the token count.</p>
 <p>Authentication, subscription validation, and model access controls still apply to all endpoints — only token-based rate limiting enforcement is affected.</p>
 </div>
+<h3 id="model-server-must-include-usage-data">Model server must include usage data</h3>
+<p>Token rate limiting requires the model server to return <code>usage.total_tokens</code> in every OpenAI-format response, including streaming chat completions. Without this, the gateway sees 0 tokens consumed and rate limits are never triggered. Embedding endpoints are unaffected because they always return non-streaming JSON with <code>usage.total_tokens</code>.</p>
+<p>How to enable this depends on the model server:</p>
+<p><strong>vLLM / llm-d</strong> — start the server with <code>--enable-force-include-usage</code>. This can be passed as a container arg, appended to <code>VLLM_ADDITIONAL_ARGS</code>, or added to the <code>vllm serve</code> command line. See the <a href="https://docs.vllm.ai/en/stable/cli/serve/#-enable-force-include-usage-no-enable-force-include-usage">vLLM documentation</a> for details.</p>
+<p><strong>TGI (Text Generation Inference)</strong> — consult the TGI documentation for the equivalent server option that includes usage data in streaming responses.</p>
+<p><strong>Other servers</strong> — ensure the server includes a <code>usage</code> object with <code>total_tokens</code> in every <code>/v1/chat/completions</code> response, including streamed (SSE) responses. The gateway extracts this field for rate limiting regardless of which server produced it.</p>
 <div class="admonition note">
 <p class="admonition-title">Namespace requirements</p>
 <p>Both <strong>MaaSAuthPolicy</strong> and <strong>MaaSSubscription</strong> must be installed in the <code>models-as-a-service</code> namespace. Each <code>modelRefs</code> entry must specify the <code>namespace</code> where the MaaSModelRef lives (e.g. <code>llm</code>).</p>
@@ -3808,6 +3858,9 @@
 <li>Check MaaSAuthPolicy in <code>models-as-a-service</code> includes the user's groups and references the MaaSModelRef with correct <code>name</code> (e.g. <code>${MODEL_NAME}-ref</code>) and <code>namespace</code></li>
 <li>Ensure MaaSSubscription in <code>models-as-a-service</code> exists for the model and user's groups</li>
 </ul>
+<h3 id="token-rate-limits-not-enforced-no-429-errors">Token rate limits not enforced (no 429 errors)</h3>
+<p><strong>Cause:</strong> The model server is not returning <code>usage.total_tokens</code> in responses. The gateway sees 0 tokens consumed and never triggers the rate limit. This commonly affects streaming chat completion requests.</p>
+<p><strong>Fix:</strong> Ensure the model server returns <code>usage.total_tokens</code> in every response. For vLLM / llm-d, start with <code>--enable-force-include-usage</code>; for other servers, use the equivalent option. See <a href="#model-server-must-include-usage-data">Model server must include usage data</a> for server-specific instructions.</p>
 <h3 id="policies-not-enforced">Policies not enforced</h3>
 <p><strong>Cause:</strong> Kuadrant controller may need to re-sync.</p>
 <p><strong>Fix:</strong></p>
@@ -3843,7 +3896,7 @@
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="September 24, 2026 00:02:58 UTC">September 24, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 14, 2026 14:34:48 UTC">October 14, 2026</span>
   </span>
 
     
