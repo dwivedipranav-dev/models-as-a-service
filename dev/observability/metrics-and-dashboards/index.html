@@ -3766,7 +3766,7 @@
 <a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">  </span><span class="o">(</span><span class="kr">rate</span><span class="o">(</span><span class="nv">istio_request_duration_milliseconds_bucket</span><span class="p">{</span><span class="nl">subscription</span><span class="o">!=</span><span class="p">&quot;&quot;}[</span><span class="s">5m</span><span class="p">]</span><span class="o">)))</span>
 </code></pre></div>
 <h2 id="perses-dashboards">Perses Dashboards</h2>
-<p>Usage dashboards appear in the ODH/RHOAI observability console. Enable them with operator-managed telemetry (and optionally <code>usageLogging</code> / <code>usageMetricsDashboard</code>) — see <a href="../setup/">Setup</a>. Operator vs Kustomize ownership and cleanup: <a href="../operations/#cleanup">Operations</a>.</p>
+<p>Usage dashboards appear in the ODH/RHOAI observability console. The logs-based dashboards are deployed with the usage-log resources. The legacy metrics dashboard is optional via <code>usageMetricsDashboard</code>. See <a href="../setup/">Setup</a>. Operator vs Kustomize ownership and cleanup: <a href="../operations/#cleanup">Operations</a>.</p>
 <table>
 <thead>
 <tr>
@@ -3783,12 +3783,12 @@
 </tr>
 <tr>
 <td><strong>Usage</strong> (<code>dashboard-4-maas-usage-logs-admin</code>)</td>
-<td><code>usageLogging: true</code></td>
+<td>Always, while <code>Config/default</code> exists</td>
 <td>Admin usage from structured access logs (Loki)</td>
 </tr>
 <tr>
 <td><strong>My Usage</strong> (<code>dashboard-5-maas-usage-logs</code>)</td>
-<td><code>usageLogging: true</code></td>
+<td>Always, while <code>Config/default</code> exists</td>
 <td>User-scoped usage from structured access logs</td>
 </tr>
 </tbody>
@@ -3823,7 +3823,7 @@
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 8, 2026 12:04:35 UTC">October 8, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 14, 2026 12:04:22 UTC">October 14, 2026</span>
   </span>
 
     
