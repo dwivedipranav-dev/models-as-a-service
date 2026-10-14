@@ -2199,6 +2199,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#audience-and-token-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audience and token purpose
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#multi-tenant-oidc" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3361,6 +3372,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#audience-and-token-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audience and token purpose
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#multi-tenant-oidc" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3517,7 +3539,10 @@
 <a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="nt">oidc</span><span class="p">:</span>
 <a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">    </span><span class="nt">issuerUrl</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://keycloak.example.com/realms/maas&quot;</span>
 <a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="nt">clientId</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">maas-api</span>
-<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">    </span><span class="nt">ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">  </span><span class="c1"># optional: JWKS cache TTL in seconds (default 300, minimum 30)</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">    </span><span class="nt">audience</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">maas-api</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">    </span><span class="nt">accessTokenPurposeClaim</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">token_use</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">    </span><span class="nt">accessTokenPurpose</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">access</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">    </span><span class="nt">ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">  </span><span class="c1"># optional: JWKS cache TTL in seconds (default 300, minimum 30)</span>
 </code></pre></div>
 <table>
 <thead>
@@ -3539,6 +3564,21 @@
 <td>OAuth2 client ID. Incoming tokens must carry an <code>azp</code> claim matching this value.</td>
 </tr>
 <tr>
+<td><code>audience</code></td>
+<td>No</td>
+<td>Exact value required as the token <code>aud</code> string or as one element of its <code>aud</code> array. Required for delegated Grid administration.</td>
+</tr>
+<tr>
+<td><code>accessTokenPurposeClaim</code></td>
+<td>No</td>
+<td>Simple claim name carrying the access-token purpose, such as <code>token_use</code>. Must be set with <code>accessTokenPurpose</code>; required for delegated Grid administration.</td>
+</tr>
+<tr>
+<td><code>accessTokenPurpose</code></td>
+<td>No</td>
+<td>Exact value required in <code>accessTokenPurposeClaim</code>. Must be set with <code>accessTokenPurposeClaim</code>; required for delegated Grid administration.</td>
+</tr>
+<tr>
 <td><code>ttl</code></td>
 <td>No</td>
 <td>JWKS cache duration in seconds (default <code>300</code>, minimum <code>30</code>).</td>
@@ -3547,6 +3587,39 @@
 </table>
 <p>The controller propagates this configuration to the tenant's gateway-level <code>maas-gateway-auth</code> AuthPolicy in the gateway namespace. OIDC is <strong>not</strong> configured by patching route-level auth policies.</p>
 <p>For <strong>legacy unmanaged tenants</strong> (not backed by an <code>AITenant</code>), configure <code>Tenant.spec.externalOIDC</code> with the same field semantics. During upgrade, existing <code>Tenant/default-tenant.spec.externalOIDC</code> values are migrated to <code>AITenant/models-as-a-service.spec.oidc</code> automatically.</p>
+<h3 id="audience-and-token-purpose">Audience and token purpose</h3>
+<p><code>audience</code> and the access-token-purpose fields provide different, complementary
+guarantees:</p>
+<ul>
+<li><code>audience</code> requires MaaS to be an intended recipient of the token. It rejects
+  otherwise valid tokens issued for another API or resource.</li>
+<li><code>accessTokenPurposeClaim</code> and <code>accessTokenPurpose</code> require the JWT to be an
+  access token rather than an ID token or another purpose-specific JWT. This
+  protects against token-type confusion when a provider, shared audience, or
+  misconfiguration allows more than one token type to carry the MaaS audience.</li>
+<li><code>clientId</code> (<code>azp</code>) binds the token to the configured OAuth client, while
+  <code>issuerUrl</code> (<code>iss</code>) binds it to the configured identity authority.</li>
+</ul>
+<p>In a standard OIDC deployment, an ID token normally has the OAuth client as its
+audience and an access token has the resource API as its audience. The purpose
+check is therefore defense in depth and an explicit provider contract: it fails
+closed if the configured purpose claim is missing or has the wrong value.</p>
+<p>The purpose fields have these limits:</p>
+<ul>
+<li>They check a <strong>JWT payload claim</strong>, not the JOSE header. If a provider only
+  expresses token type in the header, such as a header-only <code>typ</code> value, MaaS
+  cannot enforce it with these fields; the provider must emit an equivalent
+  mapper-controlled payload claim.</li>
+<li>The claim must be controlled by the IdP. A user-editable profile field or
+  client-controlled value provides no security guarantee.</li>
+<li>The check does not replace signature, expiry, issuer, audience, or client
+  validation, and it does not provide revocation, freshness, organization-role
+  authorization, or theft protection.</li>
+</ul>
+<p>Delegated Grid administration requires both an explicit audience and a purpose
+claim/value pair. Legacy OIDC deployments may omit the optional fields during
+migration, but those tokens do not satisfy the delegated-administration token
+contract.</p>
 <p>See <a href="../../concepts/auth-modes/">Authentication Modes</a> for the full field alignment between <code>AITenant.spec.oidc</code> and <code>Tenant.spec.externalOIDC</code>, and <a href="../../reference/crds/ai-tenant/">AITenant CRD</a> for the authoritative schema.</p>
 <h3 id="multi-tenant-oidc">Multi-tenant OIDC</h3>
 <p>Each <code>AITenant</code> can reference its own Gateway and OIDC provider. Tokens from one tenant's IdP are validated only against that tenant's gateway AuthPolicy — a token issued by tenant A's provider must not authenticate on tenant B's gateway.</p>
@@ -3702,9 +3775,14 @@
 <td>MaaS external OIDC uses <strong>JWT bearer validation only</strong>. Tokens are validated against the IdP's public JWKS. No <code>client_secret</code> is required or stored at runtime. The <code>clientId</code> field is configuration, not a credential.</td>
 </tr>
 <tr>
-<td><strong>OAuth client binding (<code>azp</code> claim)</strong></td>
+<td><strong>Issuer and OAuth client binding (<code>iss</code>/<code>azp</code> claims)</strong></td>
 <td>MaaS controller (gateway AuthPolicy)</td>
-<td>The generated <code>maas-gateway-auth</code> AuthPolicy includes an <code>oidc-client-bound</code> rule that checks <code>auth.identity.azp == clientId</code>. Tokens issued to a different OAuth client are rejected with 403, even if they share the same issuer. An <code>has(auth.identity.azp)</code> guard ensures OpenShift TokenReview identities (which carry no <code>azp</code> claim) are unaffected.</td>
+<td>The generated <code>maas-gateway-auth</code> AuthPolicy requires <code>auth.identity.iss == issuerUrl</code> and <code>auth.identity.azp == clientId</code> for external JWTs. Tokens from another issuer or OAuth client are rejected with 403. OpenShift TokenReview identities use their existing user-object path and are not selected by this rule.</td>
+</tr>
+<tr>
+<td><strong>Audience and token purpose (<code>aud</code>/purpose claim)</strong></td>
+<td>MaaS controller (gateway AuthPolicy)</td>
+<td>When configured, the same rule requires the intended <code>aud</code> value and configured access-token purpose. Delegated Grid administration requires both checks. Legacy OIDC deployments can omit these optional fields during migration.</td>
 </tr>
 <tr>
 <td><strong>OIDC group claim sanitization</strong></td>
@@ -3759,7 +3837,7 @@
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="July 24, 2026 16:23:16 UTC">July 24, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 14, 2026 05:27:15 UTC">October 14, 2026</span>
   </span>
 
     

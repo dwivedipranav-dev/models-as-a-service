@@ -3406,7 +3406,7 @@
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>  → maas-api (mint API key with OIDC identity)
 <a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>  → User uses API key for inference
 </code></pre></div>
-<p><strong>Token validation layer:</strong> Gateway / Authorino validates the JWT locally using cached JWKS keys from the IdP. The <code>azp</code> (authorized party) claim is checked against the configured <code>clientId</code>.</p>
+<p><strong>Token validation layer:</strong> Gateway / Authorino validates the JWT locally using cached JWKS keys from the IdP. External JWTs must match the configured <code>iss</code> and <code>azp</code> claims; optional audience and access-token-purpose fields add a stricter contract for delegated administration.</p>
 <p><strong>What the admin configures:</strong></p>
 <p>For AITenant-managed tenants (including the default tenant), configure OIDC on the AITenant CR:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">maas.opendatahub.io/v1alpha1</span>
@@ -3418,7 +3418,10 @@
 <a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span><span class="nt">oidc</span><span class="p">:</span>
 <a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="nt">issuerUrl</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://keycloak.example.com/realms/maas&quot;</span>
 <a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">    </span><span class="nt">clientId</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">maas-api</span>
-<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">    </span><span class="nt">ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">    </span><span class="nt">audience</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">maas-api</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">    </span><span class="nt">accessTokenPurposeClaim</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">token_use</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">    </span><span class="nt">accessTokenPurpose</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">access</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">    </span><span class="nt">ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span>
 </code></pre></div>
 <table>
 <thead>
@@ -3437,6 +3440,18 @@
 <td>OAuth2 client ID. Tokens must have <code>azp</code> claim matching this value.</td>
 </tr>
 <tr>
+<td><code>audience</code></td>
+<td>Exact required token audience; MaaS must be an intended token recipient. Required for delegated Grid administration.</td>
+</tr>
+<tr>
+<td><code>accessTokenPurposeClaim</code></td>
+<td>Mapper-controlled payload claim carrying the access-token purpose; set with <code>accessTokenPurpose</code>.</td>
+</tr>
+<tr>
+<td><code>accessTokenPurpose</code></td>
+<td>Exact value required in <code>accessTokenPurposeClaim</code>; set with <code>accessTokenPurposeClaim</code>.</td>
+</tr>
+<tr>
 <td><code>ttl</code></td>
 <td>JWKS cache duration in seconds (default: 300, minimum: 30).</td>
 </tr>
@@ -3452,7 +3467,10 @@
 <a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span><span class="nt">externalOIDC</span><span class="p">:</span>
 <a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">    </span><span class="nt">issuerUrl</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://keycloak.example.com/realms/maas&quot;</span>
 <a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">    </span><span class="nt">clientId</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">maas-api</span>
-<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">    </span><span class="nt">ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">    </span><span class="nt">audience</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">maas-api</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">    </span><span class="nt">accessTokenPurposeClaim</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">token_use</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">    </span><span class="nt">accessTokenPurpose</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">access</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">    </span><span class="nt">ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span>
 </code></pre></div>
 <p><strong>When to use:</strong> Programmatic API access from CI/CD pipelines, external applications, or enterprise environments that federate identity through a central IdP rather than OpenShift OAuth.</p>
 <h2 id="how-both-modes-coexist">How Both Modes Coexist</h2>
@@ -3505,7 +3523,8 @@
 <p>For Mode 2 (standalone OIDC), the IdP must:</p>
 <ul>
 <li>Serve <code>/.well-known/openid-configuration</code> over HTTPS at the <code>issuerUrl</code></li>
-<li>Include <code>azp</code> (authorized party) claim in issued tokens matching the configured <code>clientId</code></li>
+<li>Include <code>iss</code> and <code>azp</code> (authorized party) claims matching the configured issuer and client</li>
+<li>Include the configured <code>aud</code> and access-token-purpose values when delegated Grid administration is enabled</li>
 <li>Expose a JWKS endpoint for public key retrieval</li>
 <li>Issue tokens with group claims if group-based authorization is needed (claim name depends on IdP configuration)</li>
 </ul>
@@ -3535,6 +3554,24 @@
 <td>OAuth2 client ID for <code>azp</code> claim matching</td>
 </tr>
 <tr>
+<td>Audience</td>
+<td><code>spec.externalOIDC.audience</code></td>
+<td><code>spec.oidc.audience</code></td>
+<td>Exact token audience</td>
+</tr>
+<tr>
+<td>Purpose claim</td>
+<td><code>spec.externalOIDC.accessTokenPurposeClaim</code></td>
+<td><code>spec.oidc.accessTokenPurposeClaim</code></td>
+<td>Claim carrying access-token purpose</td>
+</tr>
+<tr>
+<td>Purpose value</td>
+<td><code>spec.externalOIDC.accessTokenPurpose</code></td>
+<td><code>spec.oidc.accessTokenPurpose</code></td>
+<td>Required access-token purpose</td>
+</tr>
+<tr>
 <td>JWKS TTL</td>
 <td><code>spec.externalOIDC.ttl</code></td>
 <td><code>spec.oidc.ttl</code></td>
@@ -3542,6 +3579,9 @@
 </tr>
 </tbody>
 </table>
+<p>See <a href="../../advanced-administration/external-oidc/#audience-and-token-purpose">Audience and token purpose</a>
+for the distinction between recipient binding and token-type binding, including
+provider requirements and the checks' limits.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>For AITenant-managed tenants, set OIDC on the AITenant CR. The controller propagates the configuration to the tenant's gateway AuthPolicy. The Tenant CR's <code>externalOIDC</code> field is ignored for AITenant-managed tenants.</p>
@@ -3576,7 +3616,7 @@
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="July 30, 2026 21:50:10 UTC">July 30, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 14, 2026 05:27:15 UTC">October 14, 2026</span>
   </span>
 
     
