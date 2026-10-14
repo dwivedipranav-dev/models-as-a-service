@@ -1712,8 +1712,30 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Bulk Key Revocation">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#organization-association-and-subscription-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Organization Association and Subscription Names
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Organization Association and Subscription Names">
       <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#upgrade-and-rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade and rollback
+      
+    </span>
+  </a>
+  
+</li>
         
           <li class="md-nav__item">
   <a href="#revoking-all-keys-for-a-user" class="md-nav__link">
@@ -3445,8 +3467,30 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Bulk Key Revocation">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#organization-association-and-subscription-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Organization Association and Subscription Names
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Organization Association and Subscription Names">
       <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#upgrade-and-rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade and rollback
+      
+    </span>
+  </a>
+  
+</li>
         
           <li class="md-nav__item">
   <a href="#revoking-all-keys-for-a-user" class="md-nav__link">
@@ -3657,6 +3701,13 @@
 <p>Lifecycle-invalidated rows, including regular and ephemeral keys, are soft-deleted with a 90-day retention period by default, matching the tenancy architecture decision record. Set <code>spec.apiKeys.deletionRetentionDays</code> on <code>MaasTenantConfig</code> for an operator-managed tenant, or set <code>API_KEY_DELETION_RETENTION_DAYS</code> on a standalone maas-api deployment. The regular internal cleanup CronJob still removes expired ephemeral keys after its 30-minute grace period, but never removes lifecycle-invalidated rows; those rows are physically removed only after the configured retention period. Active regular keys remain until manually revoked. Each lifecycle cleanup emits a structured audit log containing the tenant, scope, deleted-key count, timestamp, and controller initiator.</p>
 <h2 id="bulk-key-revocation">Bulk Key Revocation</h2>
 <p>Platform administrators can bulk revoke API keys by <strong>user</strong>, by <strong>subscription</strong>, or both. A <strong>dry-run</strong> mode is available to preview how many keys would be revoked before committing.</p>
+<h2 id="organization-association-and-subscription-names">Organization Association and Subscription Names</h2>
+<p>API keys remain bound to the user who created them and to the <code>(MaaS Tenant, subscription name)</code> pair. MaaS does not add a runtime registry that distinguishes multiple incarnations of the same subscription name.</p>
+<p><code>MaaSSubscription.spec.organization.id</code> is an optional, non-empty string and a stable association for delegated administration. A legacy subscription can gain the field once, only after an administrator or provisioning process has verified that the existing keys and history really belong to that organization. After the field is set, it cannot be changed or removed. Omitting it preserves legacy behavior and grants no organization-administration permission. Organization administration does not grant inference access, API-key creation, or model access; owners and MaaSAuthPolicy subjects continue to control those paths independently.</p>
+<p>Subscription names must be unique and must not be reused or reassigned within a MaaS Tenant, especially when subscriptions from multiple organizations share that Tenant. Reusing a name can expose the previous subscription's remaining key metadata and revocation scope to the new organization administrators, and historical usage may remain associated with that name. MaaS documents this limitation but does not automatically detect or prevent name reuse. Before assigning an organization to a legacy subscription, verify its key and history association, revoke or migrate any unrelated keys, and retain an audit record of the adoption decision.</p>
+<h3 id="upgrade-and-rollback">Upgrade and rollback</h3>
+<p>Install the updated <code>MaaSSubscription</code> CRD before deploying a controller or API version that reads <code>spec.organization.id</code>. The optional field leaves existing unmarked subscriptions valid and does not change owner checks, model access, inference grants, or key bindings.</p>
+<p>For a supported rollback, roll back the controller or API workload while retaining the updated CRD. Older workloads ignore the organization field, and the association remains available if the deployment is rolled forward again. Do not replace the CRD with an older schema while association data must be preserved: an older schema can prune the field on later writes.</p>
 <h3 id="revoking-all-keys-for-a-user">Revoking All Keys for a User</h3>
 <p>Send a <code>POST</code> request to <code>/v1/api-keys/bulk-revoke</code> with the target username:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>curl<span class="w"> </span>-sS<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">MAAS_API_URL</span><span class="si">}</span><span class="s2">/maas-api/v1/api-keys/bulk-revoke&quot;</span><span class="w"> </span><span class="se">\</span>
@@ -3820,7 +3871,7 @@
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 6, 2026 14:47:31 UTC">October 6, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 14, 2026 15:15:11 UTC">October 14, 2026</span>
   </span>
 
     
