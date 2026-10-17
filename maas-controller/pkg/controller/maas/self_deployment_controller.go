@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -59,8 +60,14 @@ import (
 // can strip it from older installs.
 const CleanupFinalizer = "maas.opendatahub.io/cleanup"
 
-// usageLogsCollectorName is the OpenTelemetryCollector resource for gateway usage logs.
-const usageLogsCollectorName = "usage-logs"
+// usageLogsCollectorClusterRoleBindingName grants the usage-logs collector write
+// access to application logs. It is removed when the collector CRD is unavailable
+// (CWE-863). Disabling usageLogging removes it with the rest of the usage-logs-only
+// resources.
+const usageLogsCollectorClusterRoleBindingName = "usage-collector-application-logs-write"
+
+// usageLogsDsciManagedKustomizeDir is the kustomization rendered when usageLogging is false or omitted.
+const usageLogsDsciManagedKustomizeDir = "dsci-managed"
 
 // usageLogsTenancyProxyDeploymentName is the Deployment for the Loki query tenancy proxy.
 const usageLogsTenancyProxyDeploymentName = "usage-logs-tenancy-proxy"
@@ -85,10 +92,17 @@ type LifecycleReconciler struct {
 	DeploymentNS                string
 	TenantSubscriptionNamespace string
 	AITenantNamespace           string
+	GatewayName                 string
 	GatewayNamespace            string
 	ObservabilityManifestsPath  string
 	MonitoringNamespace         string
 	UsageLogsManifestPath       string
+	DiscoveryEnabled            bool
+	DiscoveryManifestPath       string
+	DiscoveryImage              string
+	DiscoveryLogLevel           string
+	DiscoveryNamespace          string
+	DiscoveryReplicas           *int32
 }
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
@@ -97,6 +111,7 @@ type LifecycleReconciler struct {
 //+kubebuilder:rbac:groups=maas.opendatahub.io,resources=configs/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=maas.opendatahub.io,resources=maastenantconfigs,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=maas.opendatahub.io,resources=aitenants,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch
 //+kubebuilder:rbac:groups=perses.dev,resources=persesdashboards;persesdatasources,verbs=get;list;watch;create;patch;delete
 //+kubebuilder:rbac:groups=opentelemetry.io,resources=opentelemetrycollectors,verbs=get;list;watch;create;patch;delete
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings;rolebindings,verbs=get;list;watch;create;patch;delete
@@ -145,6 +160,9 @@ func (r *LifecycleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return *res, nil
 		}
 		if err := r.ensureObservability(ctx, log); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.ensureDiscoveryService(ctx, log); err != nil {
 			return ctrl.Result{}, err
 		}
 		if err := r.stripLegacyCleanupFinalizer(ctx, log, req.NamespacedName); err != nil {
@@ -496,7 +514,8 @@ func (r *LifecycleReconciler) ensureLimitadorServiceMonitor(ctx context.Context)
 	return nil
 }
 
-// ensureUsageDashboard creates the usage dashboard in the monitoring namespace.
+// ensureUsageDashboard deploys or removes the legacy metrics-based usage dashboard
+// based on the Config's usageMetricsDashboard feature gate.
 // Uses the existing kustomize infrastructure to render manifests from ObservabilityManifestsPath.
 // If ObservabilityManifestsPath is not set or Perses CRDs are not installed, gracefully skips.
 func (r *LifecycleReconciler) ensureUsageDashboard(ctx context.Context, log logr.Logger) error {
@@ -519,6 +538,10 @@ func (r *LifecycleReconciler) ensureUsageDashboard(ctx context.Context, log logr
 	resources, err := tenantreconcile.RenderKustomize(r.ObservabilityManifestsPath, r.MonitoringNamespace)
 	if err != nil {
 		return fmt.Errorf("render observability dashboards: %w", err)
+	}
+
+	if !ptr.Deref(cfg.Spec.UsageMetricsDashboard, false) {
+		return r.deleteOwnedRenderedResources(ctx, log, cfg, resources, "usageMetricsDashboard")
 	}
 
 	// Apply each resource with Config as controller owner
@@ -546,8 +569,10 @@ func (r *LifecycleReconciler) ensureUsageDashboard(ctx context.Context, log logr
 	return nil
 }
 
-// ensureUsageLogs deploys or removes OTel collector and RBAC for usage logging based on
-// the Config's usageLogging feature gate.
+// ensureUsageLogs deploys usage-log dashboards, the tenancy proxy, and related RBAC.
+// usageLogging true renders usage-logs. false and omitted render dsci-managed.
+// Objects rendered by both bundles are applied in place. Controller-owned objects
+// rendered only by the other bundle are deleted.
 func (r *LifecycleReconciler) ensureUsageLogs(ctx context.Context, log logr.Logger) error {
 	if r.UsageLogsManifestPath == "" {
 		log.Info("WARNING: Usage logs manifest path not configured; skipping usage logs")
@@ -562,94 +587,156 @@ func (r *LifecycleReconciler) ensureUsageLogs(ctx context.Context, log logr.Logg
 		return err
 	}
 
-	resources, err := tenantreconcile.RenderKustomize(r.UsageLogsManifestPath, r.MonitoringNamespace)
+	usageLogging := ptr.Deref(cfg.Spec.UsageLogging, false)
+	manifestPath := usageLogsKustomizeDir(r.UsageLogsManifestPath, usageLogging)
+	inactivePath := usageLogsKustomizeDir(r.UsageLogsManifestPath, !usageLogging)
+	resources, err := tenantreconcile.RenderKustomize(manifestPath, r.MonitoringNamespace)
 	if err != nil {
 		return fmt.Errorf("render usage logs: %w", err)
 	}
+	inactive, err := tenantreconcile.RenderKustomize(inactivePath, r.MonitoringNamespace)
+	if err != nil {
+		return fmt.Errorf("render inactive usage logs: %w", err)
+	}
 
-	if !ptr.Deref(cfg.Spec.UsageLogging, false) {
-		for _, resource := range resources {
-			res := resource.DeepCopy()
-			key := client.ObjectKeyFromObject(res)
-			existing := &unstructured.Unstructured{}
-			existing.SetGroupVersionKind(res.GroupVersionKind())
+	// Track if the collector is skipped due to missing CRD (CWE-863).
+	// If the OpenTelemetryCollector CRD is unavailable, we must skip the entire
+	// bundle to prevent orphaned ClusterRoleBinding from granting cluster-logging-application-write
+	// permissions to a ServiceAccount (usage-logs-collector) that anyone could then create and exploit.
+	collectorSkipped := false
 
-			if err := r.Get(ctx, key, existing); err != nil {
-				if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) {
-					continue
+	for _, resource := range resources {
+		if collectorSkipped {
+			continue
+		}
+		res := resource // avoid loop variable aliasing
+		if err := patchTenancyProxyImage(&res); err != nil {
+			return fmt.Errorf("patch %s %s: %w", res.GetKind(), res.GetName(), err)
+		}
+		if err := patchPersesDatasourceURL(&res); err != nil {
+			return fmt.Errorf("patch %s %s: %w", res.GetKind(), res.GetName(), err)
+		}
+		if err := controllerutil.SetControllerReference(&cfg, &res, r.Scheme); err != nil {
+			return fmt.Errorf("set controller reference on %s %s: %w", res.GetKind(), res.GetName(), err)
+		}
+
+		if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(&res), client.ForceOwnership, client.FieldOwner("maas-controller")); err != nil {
+			if isOptionalAPIGroup(res.GroupVersionKind().Group) && (apimeta.IsNoMatchError(err) || apierrors.IsNotFound(err)) {
+				log.Info("skipping usage-logs resource: optional CRD not yet registered, will apply once installed",
+					"group", res.GroupVersionKind().Group, "kind", res.GetKind(),
+					"name", res.GetName(), "namespace", res.GetNamespace())
+				if res.GetKind() == "OpenTelemetryCollector" {
+					collectorSkipped = true
 				}
-				return fmt.Errorf("get %s %s/%s before delete: %w", res.GetKind(), res.GetNamespace(), res.GetName(), err)
-			}
-
-			if !isOwnedByConfigOrController(existing, cfg.UID) {
-				log.V(1).Info("skipping deletion of unowned usage-logs resource",
-					"kind", res.GetKind(), "name", res.GetName(), "namespace", res.GetNamespace())
 				continue
 			}
-
-			if err := r.Delete(ctx, existing); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("delete %s %s/%s: %w", res.GetKind(), res.GetNamespace(), res.GetName(), err)
-			}
-			log.V(1).Info("deleted usage-logs resource (usageLogging disabled)",
-				"kind", res.GetKind(), "name", res.GetName(), "namespace", res.GetNamespace())
-		}
-	} else {
-		// Track if the collector is skipped due to missing CRD (CWE-863).
-		// If the OpenTelemetryCollector CRD is unavailable, we must skip the entire
-		// bundle to prevent orphaned ClusterRoleBinding from granting cluster-logging-application-write
-		// permissions to a ServiceAccount (usage-logs-collector) that anyone could then create and exploit.
-		collectorSkipped := false
-
-		for _, resource := range resources {
-			res := resource // avoid loop variable aliasing
-			if err := patchTenancyProxyImage(&res); err != nil {
-				return fmt.Errorf("patch %s %s: %w", res.GetKind(), res.GetName(), err)
-			}
-			if err := patchPersesDatasourceURL(&res); err != nil {
-				return fmt.Errorf("patch %s %s: %w", res.GetKind(), res.GetName(), err)
-			}
-			if err := controllerutil.SetControllerReference(&cfg, &res, r.Scheme); err != nil {
-				return fmt.Errorf("set controller reference on %s %s: %w", res.GetKind(), res.GetName(), err)
-			}
-
-			if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(&res), client.ForceOwnership, client.FieldOwner("maas-controller")); err != nil {
-				if isOptionalAPIGroup(res.GroupVersionKind().Group) && (apimeta.IsNoMatchError(err) || apierrors.IsNotFound(err)) {
-					log.Info("skipping usage-logs resource: optional CRD not yet registered, will apply once installed",
-						"group", res.GroupVersionKind().Group, "kind", res.GetKind(),
-						"name", res.GetName(), "namespace", res.GetNamespace())
-					if res.GetKind() == "OpenTelemetryCollector" {
-						collectorSkipped = true
-					}
-					continue
-				}
-				return fmt.Errorf("apply %s %s/%s: %w", res.GetKind(), res.GetNamespace(), res.GetName(), err)
-			}
-		}
-
-		// If the collector was skipped, delete any orphaned RBAC resources that may have
-		// been created in a prior reconcile when the CRD was available (CWE-863).
-		if collectorSkipped {
-			gvkClusterRoleBinding := schema.GroupVersionKind{
-				Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding",
-			}
-			crb := &unstructured.Unstructured{}
-			crb.SetGroupVersionKind(gvkClusterRoleBinding)
-			crb.SetName("usage-collector-application-logs-write")
-
-			if err := r.Get(ctx, client.ObjectKeyFromObject(crb), crb); err == nil {
-				if isOwnedByConfigOrController(crb, cfg.UID) {
-					if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
-						return fmt.Errorf("delete orphaned ClusterRoleBinding after collector skip: %w", err)
-					}
-					log.Info("deleted orphaned usage-logs ClusterRoleBinding (collector CRD unavailable)")
-				}
-			}
+			return fmt.Errorf("apply %s %s/%s: %w", res.GetKind(), res.GetNamespace(), res.GetName(), err)
 		}
 	}
 
+	// If the collector was skipped, delete any orphaned RBAC resources that may have
+	// been created in a prior reconcile when the CRD was available (CWE-863).
+	if collectorSkipped {
+		gvkClusterRoleBinding := schema.GroupVersionKind{
+			Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding",
+		}
+		crb := &unstructured.Unstructured{}
+		crb.SetGroupVersionKind(gvkClusterRoleBinding)
+		crb.SetName(usageLogsCollectorClusterRoleBindingName)
+
+		if err := r.Get(ctx, client.ObjectKeyFromObject(crb), crb); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("get orphaned ClusterRoleBinding after collector skip: %w", err)
+			}
+		} else if isOwnedByConfigOrController(crb, cfg.UID) {
+			if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete orphaned ClusterRoleBinding after collector skip: %w", err)
+			}
+			log.Info("deleted orphaned usage-logs ClusterRoleBinding (collector CRD unavailable)")
+		}
+	}
+
+	// Delete controller-owned objects that only the inactive bundle renders.
+	// Shared objects stay and were updated by the apply above. Unowned objects
+	// with the same names are left in place.
+	if err := r.deleteOwnedRenderedResources(ctx, log, cfg, resourcesAbsentFrom(inactive, resources), "usageLogging"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// resourcesAbsentFrom returns objects in have whose group, version, kind,
+// namespace, and name are not present in keep.
+func resourcesAbsentFrom(have, keep []unstructured.Unstructured) []unstructured.Unstructured {
+	present := make(map[string]struct{}, len(keep))
+	for _, obj := range keep {
+		present[renderedResourceID(obj)] = struct{}{}
+	}
+	stale := make([]unstructured.Unstructured, 0)
+	for _, obj := range have {
+		if _, ok := present[renderedResourceID(obj)]; ok {
+			continue
+		}
+		stale = append(stale, obj)
+	}
+	return stale
+}
+
+func renderedResourceID(obj unstructured.Unstructured) string {
+	gvk := obj.GroupVersionKind()
+	return strings.Join([]string{gvk.Group, gvk.Version, gvk.Kind, obj.GetNamespace(), obj.GetName()}, "/")
+}
+
+// usageLogsKustomizeDir selects the usage-logs kustomization.
+// usageLogging true uses the usage-logs directory; false and omitted use dsci-managed.
+func usageLogsKustomizeDir(base string, usageLogging bool) string {
+	if usageLogging {
+		return base
+	}
+	return filepath.Join(base, usageLogsDsciManagedKustomizeDir)
+}
+
+// deleteOwnedRenderedResources deletes resources from a rendered kustomize bundle
+// that are owned by Config or labeled as managed by maas-controller. Unowned
+// resources with the same names are left untouched (CWE-284).
+func (r *LifecycleReconciler) deleteOwnedRenderedResources(
+	ctx context.Context,
+	log logr.Logger,
+	cfg maasv1alpha1.Config,
+	resources []unstructured.Unstructured,
+	disabledFeature string,
+) error {
+	for _, resource := range resources {
+		res := resource.DeepCopy()
+		key := client.ObjectKeyFromObject(res)
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(res.GroupVersionKind())
+
+		if err := r.Get(ctx, key, existing); err != nil {
+			if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) {
+				continue
+			}
+			return fmt.Errorf("get %s %s/%s before delete: %w", res.GetKind(), res.GetNamespace(), res.GetName(), err)
+		}
+
+		if !isOwnedByConfigOrController(existing, cfg.UID) {
+			log.V(1).Info("skipping deletion of unowned resource",
+				"feature", disabledFeature,
+				"kind", res.GetKind(), "name", res.GetName(), "namespace", res.GetNamespace())
+			continue
+		}
+
+		if err := r.Delete(ctx, existing); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("delete %s %s/%s: %w", res.GetKind(), res.GetNamespace(), res.GetName(), err)
+		}
+		log.V(1).Info("deleted controller-owned rendered resource",
+			"feature", disabledFeature,
+			"kind", res.GetKind(), "name", res.GetName(), "namespace", res.GetNamespace())
+	}
 	return nil
 }
 
@@ -764,11 +851,16 @@ const (
 const conditionMessageMaxLen = 32768
 
 func truncateConditionMessage(msg string) string {
-	if len(msg) <= conditionMessageMaxLen {
+	return truncateMessage(msg, conditionMessageMaxLen)
+}
+
+// truncateMessage truncates msg to at most maxLen bytes on a UTF-8 boundary, suffixed with "…".
+func truncateMessage(msg string, maxLen int) string {
+	if len(msg) <= maxLen {
 		return msg
 	}
 	const suffix = "…"
-	limit := conditionMessageMaxLen - len(suffix)
+	limit := maxLen - len(suffix)
 	truncated := msg[:limit]
 	// Walk back until the prefix is valid UTF-8. This handles both continuation
 	// bytes and incomplete leading bytes (e.g. 0xE2 without its two following
@@ -1053,6 +1145,23 @@ func (r *LifecycleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
 				return o.GetNamespace() == r.MonitoringNamespace &&
 					o.GetLabels()["app.kubernetes.io/managed-by"] == "maas-controller"
+			})),
+		).
+		// Watch maas-discovery Deployment for reconvergence on external changes
+		Watches(
+			&appsv1.Deployment{},
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, _ client.Object) []reconcile.Request {
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{
+					Namespace: r.DeploymentNS,
+					Name:      r.DeploymentName,
+				}}}
+			}),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
+				discoveryNS := r.DiscoveryNamespace
+				if discoveryNS == "" {
+					discoveryNS = r.DeploymentNS
+				}
+				return o.GetName() == discoveryDeploymentName && o.GetNamespace() == discoveryNS
 			})),
 		).
 		Complete(r)
