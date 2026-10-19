@@ -279,10 +279,10 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	require.NoError(t, unstructured.SetNestedField(fixedProcessingPatch, "payload-processing-extproc",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
 	require.NoError(t, unstructured.SetNestedSlice(fixedClusterNoAddEF.Object, []any{fixedPreProcessingPatch, fixedProcessingPatch}, "spec", "configPatches"))
-	clusterAddPatch := func(name, serviceName string) map[string]any {
+	clusterAddPatch := func(name, serviceName string, port int64) map[string]any {
 		socketAddress := map[string]any{
 			"address": serviceName + "." + gwNS + ".svc.cluster.local",
-			"port_value": int64(9004),
+			"port_value": port,
 		}
 		endpoint := map[string]any{"address": map[string]any{"socket_address": socketAddress}}
 		assignment := map[string]any{
@@ -304,8 +304,8 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 			},
 		}
 	}
-	preClusterAdd := clusterAddPatch("payload-pre-processing-extproc", PayloadPreProcessingServiceName(tenantID))
-	processingClusterAdd := clusterAddPatch("payload-processing-extproc", PayloadProcessingServiceName(tenantID))
+	preClusterAdd := clusterAddPatch("payload-pre-processing-extproc", PayloadPreProcessingServiceName(tenantID), 9004)
+	processingClusterAdd := clusterAddPatch("payload-processing-extproc", PayloadProcessingServiceName(tenantID), 9004)
 	fixedClusterEF := fixedClusterNoAddEF.DeepCopy()
 	require.NoError(t, unstructured.SetNestedSlice(fixedClusterEF.Object,
 		[]any{fixedPreProcessingPatch, fixedProcessingPatch, preClusterAdd, processingClusterAdd}, "spec", "configPatches"))
@@ -315,6 +315,21 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	missingProcessingClusterEF := fixedClusterNoAddEF.DeepCopy()
 	require.NoError(t, unstructured.SetNestedSlice(missingProcessingClusterEF.Object,
 		[]any{fixedPreProcessingPatch, fixedProcessingPatch, preClusterAdd}, "spec", "configPatches"))
+	missingEndpointAdd := runtime.DeepCopyJSONValue(preClusterAdd).(map[string]any)
+	unstructured.RemoveNestedField(missingEndpointAdd, "patch", "value", "load_assignment")
+	missingEndpointEF := fixedClusterNoAddEF.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(missingEndpointEF.Object,
+		[]any{fixedPreProcessingPatch, fixedProcessingPatch, missingEndpointAdd, processingClusterAdd}, "spec", "configPatches"))
+	wrongServiceEF := fixedClusterNoAddEF.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(wrongServiceEF.Object,
+		[]any{fixedPreProcessingPatch, fixedProcessingPatch,
+			clusterAddPatch("payload-pre-processing-extproc", PayloadProcessingServiceName(tenantID), 9004), processingClusterAdd},
+		"spec", "configPatches"))
+	wrongPortEF := fixedClusterNoAddEF.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(wrongPortEF.Object,
+		[]any{fixedPreProcessingPatch, fixedProcessingPatch, preClusterAdd,
+			clusterAddPatch("payload-processing-extproc", PayloadProcessingServiceName(tenantID), 9005)},
+		"spec", "configPatches"))
 	mirroredPreProcessing := preProcessing.DeepCopy()
 	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Image = "registry.example/custom:latest"
 	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Args = nil
@@ -370,6 +385,12 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 			preProcessingService, processingService, missingPreClusterEF}, detail: "matching CLUSTER ADD patch"},
 		{name: "fixed processing cluster without ADD patch", seed: []client.Object{preProcessing, processing,
 			preProcessingService, processingService, missingProcessingClusterEF}, detail: "matching CLUSTER ADD patch"},
+		{name: "fixed pre-processing cluster without endpoint", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, missingEndpointEF}, detail: "matching CLUSTER ADD patch"},
+		{name: "fixed pre-processing cluster points to wrong service", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, wrongServiceEF}, detail: "matching CLUSTER ADD patch"},
+		{name: "fixed processing cluster uses wrong port", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, wrongPortEF}, detail: "matching CLUSTER ADD patch"},
 		{name: "ready", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, ef}, ready: true},
 		{name: "ready with fixed Praxis cluster names", seed: []client.Object{preProcessing, processing,
 			preProcessingService, processingService, fixedClusterEF}, ready: true},

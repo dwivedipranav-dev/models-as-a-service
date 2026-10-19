@@ -544,7 +544,7 @@ func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName,
 			continue
 		}
 		cluster, ok := envoyGRPC["cluster_name"].(string)
-		if ok && ((cluster == fixedCluster && hasPraxisClusterAddPatch(patches, fixedCluster)) ||
+		if ok && ((cluster == fixedCluster && hasPraxisClusterAddPatch(patches, fixedCluster, serviceName, gatewayNamespace)) ||
 			strings.Contains(cluster, serviceName+"."+gatewayNamespace+".svc")) {
 			return true
 		}
@@ -552,7 +552,8 @@ func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName,
 	return false
 }
 
-func hasPraxisClusterAddPatch(patches []any, clusterName string) bool {
+func hasPraxisClusterAddPatch(patches []any, clusterName, serviceName, gatewayNamespace string) bool {
+	serviceAddress := serviceName + "." + gatewayNamespace + ".svc.cluster.local"
 	for _, raw := range patches {
 		patch, ok := raw.(map[string]any)
 		if !ok || patch["applyTo"] != "CLUSTER" {
@@ -567,8 +568,48 @@ func hasPraxisClusterAddPatch(patches []any, clusterName string) bool {
 			continue
 		}
 		value, ok := patchSpec["value"].(map[string]any)
-		if ok && value["name"] == clusterName {
-			return true
+		if !ok || value["name"] != clusterName || value["type"] != "STRICT_DNS" {
+			continue
+		}
+		assignment, ok := value["load_assignment"].(map[string]any)
+		if !ok || assignment["cluster_name"] != clusterName {
+			continue
+		}
+		localities, ok := assignment["endpoints"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawLocality := range localities {
+			locality, ok := rawLocality.(map[string]any)
+			if !ok {
+				continue
+			}
+			lbEndpoints, ok := locality["lb_endpoints"].([]any)
+			if !ok {
+				continue
+			}
+			for _, rawLBEndpoint := range lbEndpoints {
+				lbEndpoint, ok := rawLBEndpoint.(map[string]any)
+				if !ok {
+					continue
+				}
+				endpoint, ok := lbEndpoint["endpoint"].(map[string]any)
+				if !ok {
+					continue
+				}
+				address, ok := endpoint["address"].(map[string]any)
+				if !ok {
+					continue
+				}
+				socket, ok := address["socket_address"].(map[string]any)
+				if !ok || socket["address"] != serviceAddress {
+					continue
+				}
+				port, found, err := unstructured.NestedInt64(socket, "port_value")
+				if err == nil && found && port == 9004 {
+					return true
+				}
+			}
 		}
 	}
 	return false
