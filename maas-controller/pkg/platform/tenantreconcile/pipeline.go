@@ -524,6 +524,11 @@ func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName,
 		if !ok || patch["applyTo"] != "HTTP_FILTER" {
 			continue
 		}
+		if match, ok := patch["match"].(map[string]any); ok {
+			if matchContext, ok := match["context"].(string); ok && matchContext != "GATEWAY" && matchContext != "ANY" {
+				continue
+			}
+		}
 		patchSpec, ok := patch["patch"].(map[string]any)
 		if !ok || (patchSpec["operation"] != "INSERT_BEFORE" && patchSpec["operation"] != "INSERT_AFTER") {
 			continue

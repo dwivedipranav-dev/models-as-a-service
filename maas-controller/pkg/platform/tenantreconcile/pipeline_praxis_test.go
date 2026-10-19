@@ -278,6 +278,11 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	require.NoError(t, unstructured.SetNestedField(wrongProcessingPatch, "other-service.openshift-ingress.svc.cluster.local",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
 	require.NoError(t, unstructured.SetNestedSlice(wrongPatch.Object, []any{preProcessingPatch, wrongProcessingPatch}, "spec", "configPatches"))
+	sidecarProcessingEF := ef.DeepCopy()
+	sidecarProcessingPatch := deepCopyPatch(t, processingPatch)
+	require.NoError(t, unstructured.SetNestedField(sidecarProcessingPatch, "SIDECAR_OUTBOUND", "match", "context"))
+	require.NoError(t, unstructured.SetNestedSlice(sidecarProcessingEF.Object,
+		[]any{preProcessingPatch, sidecarProcessingPatch}, "spec", "configPatches"))
 	wrongServicePortPatch := ef.DeepCopy()
 	wrongServicePortProcessingPatch := deepCopyPatch(t, processingPatch)
 	require.NoError(t, unstructured.SetNestedField(wrongServicePortProcessingPatch,
@@ -400,6 +405,8 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 		{name: "missing pre-processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingPrePatch}, detail: "has no pre-processing HTTP_FILTER patch"},
 		{name: "missing processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingProcessingPatch}, detail: "has no processing HTTP_FILTER patch"},
 		{name: "wrong processing patch cluster", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, wrongPatch}, detail: "has no processing HTTP_FILTER patch"},
+		{name: "processing patch matches sidecars only", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, sidecarProcessingEF}, detail: "has no processing HTTP_FILTER patch"},
 		{name: "processing patch cluster uses wrong port", seed: []client.Object{preProcessing, processing,
 			preProcessingService, processingService, wrongServicePortPatch}, detail: "has no processing HTTP_FILTER patch"},
 		{name: "processing patch cluster uses prefixed service", seed: []client.Object{preProcessing, processing,
