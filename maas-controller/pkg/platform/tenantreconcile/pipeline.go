@@ -259,9 +259,8 @@ func reconcilePayloadProcessingSwitch(
 					return payloadProcessingSwitchOutcome{blockedReason: detail}, nil
 				}
 			}
-			// The peer reuses these names and waits for cleanup-complete. This
-			// preflight prevents known access failures, but a gap-free swap still
-			// requires a coordinated protocol change in both controllers.
+			// The peer reuses these names and waits for cleanup-complete; a gap-free
+			// swap requires a coordinated protocol change in both controllers.
 			if err := cleanupIPPResources(ctx, c, *params, mcfg.UID, log); err != nil {
 				return payloadProcessingSwitchOutcome{}, fmt.Errorf("cleanup IPP resources: %w", err)
 			}
@@ -333,6 +332,7 @@ func praxisControllerCanReadGateway(ctx context.Context, c client.Client, gatewa
 		serviceAccount = "default"
 	}
 	user := fmt.Sprintf("system:serviceaccount:%s:%s", peer.Namespace, serviceAccount)
+	groups := []string{"system:serviceaccounts", "system:serviceaccounts:" + peer.Namespace, "system:authenticated"}
 	for _, verb := range []string{"get", "list", "watch"} {
 		attributes := &authv1.ResourceAttributes{
 			Verb:      verb,
@@ -344,7 +344,7 @@ func praxisControllerCanReadGateway(ctx context.Context, c client.Client, gatewa
 			attributes.Name = gatewayName
 		}
 		review := &authv1.SubjectAccessReview{Spec: authv1.SubjectAccessReviewSpec{
-			User: user, ResourceAttributes: attributes,
+			User: user, Groups: groups, ResourceAttributes: attributes,
 		}}
 		if err := c.Create(ctx, review); err != nil {
 			return false, "", fmt.Errorf("review %s Gateway access for %s: %w", verb, user, err)

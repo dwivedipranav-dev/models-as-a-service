@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -223,6 +224,9 @@ func gatewayAccessReviews(t *testing.T, deniedVerb string) interceptor.Funcs {
 	return interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 		if review, ok := obj.(*authv1.SubjectAccessReview); ok {
 			require.Equal(t, "system:serviceaccount:controller-ns:ai-gateway-controller", review.Spec.User)
+			assert.ElementsMatch(t, []string{
+				"system:serviceaccounts", "system:serviceaccounts:controller-ns", "system:authenticated",
+			}, review.Spec.Groups)
 			attributes := review.Spec.ResourceAttributes
 			require.NotNil(t, attributes)
 			assert.Equal(t, "gateway.networking.k8s.io", attributes.Group)
@@ -239,6 +243,36 @@ func gatewayAccessReviews(t *testing.T, deniedVerb string) interceptor.Funcs {
 		}
 		return c.Create(ctx, obj, opts...)
 	}}
+}
+
+func TestPraxisControllerCanReadGateway_GroupBasedAccess(t *testing.T) {
+	const namespaceGroup = "system:serviceaccounts:controller-ns"
+	var reviewedVerbs []string
+	cl := fake.NewClientBuilder().WithScheme(praxisTestScheme(t)).WithObjects(
+		readyPraxisControllerDeployment(),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			review, ok := obj.(*authv1.SubjectAccessReview)
+			if !ok {
+				return c.Create(ctx, obj, opts...)
+			}
+			require.Equal(t, "system:serviceaccount:controller-ns:ai-gateway-controller", review.Spec.User)
+			assert.ElementsMatch(t, []string{
+				"system:serviceaccounts", namespaceGroup, "system:authenticated",
+			}, review.Spec.Groups)
+			require.NotNil(t, review.Spec.ResourceAttributes)
+			reviewedVerbs = append(reviewedVerbs, review.Spec.ResourceAttributes.Verb)
+			// Model a Group binding: the named service account has no direct grant.
+			review.Status.Allowed = slices.Contains(review.Spec.Groups, namespaceGroup)
+			return nil
+		},
+	}).Build()
+
+	ready, detail, err := praxisControllerCanReadGateway(context.Background(), cl, "openshift-ingress", "praxis-gateway")
+	require.NoError(t, err)
+	assert.True(t, ready, detail)
+	assert.Empty(t, detail)
+	assert.Equal(t, []string{"get", "list", "watch"}, reviewedVerbs)
 }
 
 func deepCopyPatch(t *testing.T, patch map[string]any) map[string]any {
