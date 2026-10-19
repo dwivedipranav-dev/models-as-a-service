@@ -251,7 +251,7 @@ func reconcilePayloadProcessingSwitch(
 				return payloadProcessingSwitchOutcome{}, fmt.Errorf("check legacy IPP deployments: %w", err)
 			}
 			if legacyPresent {
-				ready, detail, err := praxisControllerCanReadGateway(ctx, c, params.GatewayNamespace, params.GatewayName)
+				ready, detail, err := praxisControllerCanReadGateway(ctx, c, params.ControllerNamespace, params.GatewayNamespace, params.GatewayName)
 				if err != nil {
 					return payloadProcessingSwitchOutcome{}, fmt.Errorf("check Praxis controller Gateway access: %w", err)
 				}
@@ -301,24 +301,13 @@ func reconcilePayloadProcessingSwitch(
 // praxisControllerCanReadGateway checks the peer's availability and the Gateway
 // permissions needed before it can reconcile replacement Praxis operands. This
 // is a preflight for an existing IPP stack, not proof that Praxis will deploy.
-func praxisControllerCanReadGateway(ctx context.Context, c client.Client, gatewayNamespace, gatewayName string) (bool, string, error) {
-	deployments := &appsv1.DeploymentList{}
-	if err := c.List(ctx, deployments); err != nil {
-		return false, "", fmt.Errorf("list deployments for ai-gateway-controller: %w", err)
-	}
-	var peer *appsv1.Deployment
-	for i := range deployments.Items {
-		dep := &deployments.Items[i]
-		if dep.Name != "ai-gateway-controller" {
-			continue
+func praxisControllerCanReadGateway(ctx context.Context, c client.Client, peerNamespace, gatewayNamespace, gatewayName string) (bool, string, error) {
+	peer := &appsv1.Deployment{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: peerNamespace, Name: "ai-gateway-controller"}, peer); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, "ai-gateway-controller deployment not found; retaining legacy IPP", nil
 		}
-		if peer != nil {
-			return false, "multiple ai-gateway-controller deployments found; retaining legacy IPP", nil
-		}
-		peer = dep
-	}
-	if peer == nil {
-		return false, "ai-gateway-controller deployment not found; retaining legacy IPP", nil
+		return false, "", fmt.Errorf("get ai-gateway-controller deployment: %w", err)
 	}
 	desired := int32(1)
 	if peer.Spec.Replicas != nil {

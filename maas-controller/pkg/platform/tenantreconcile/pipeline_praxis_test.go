@@ -268,11 +268,54 @@ func TestPraxisControllerCanReadGateway_GroupBasedAccess(t *testing.T) {
 		},
 	}).Build()
 
-	ready, detail, err := praxisControllerCanReadGateway(context.Background(), cl, "openshift-ingress", "praxis-gateway")
+	ready, detail, err := praxisControllerCanReadGateway(context.Background(), cl, "controller-ns", "openshift-ingress", "praxis-gateway")
 	require.NoError(t, err)
 	assert.True(t, ready, detail)
 	assert.Empty(t, detail)
 	assert.Equal(t, []string{"get", "list", "watch"}, reviewedVerbs)
+}
+
+func TestPraxisControllerCanReadGateway_IgnoresOtherNamespaces(t *testing.T) {
+	unrelated := readyPraxisControllerDeployment()
+	unrelated.Namespace = "unrelated-ns"
+	unrelated.Spec.Template.Spec.ServiceAccountName = "unrelated-service-account"
+	for _, tt := range []struct {
+		name        string
+		includePeer bool
+	}{
+		{name: "only unrelated deployment"},
+		{name: "peer and unrelated deployment", includePeer: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{unrelated}
+			if tt.includePeer {
+				objects = append(objects, readyPraxisControllerDeployment())
+			}
+			reviews := 0
+			cl := fake.NewClientBuilder().WithScheme(praxisTestScheme(t)).WithObjects(objects...).
+				WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if review, ok := obj.(*authv1.SubjectAccessReview); ok {
+						reviews++
+						assert.Equal(t, "system:serviceaccount:controller-ns:ai-gateway-controller", review.Spec.User)
+						review.Status.Allowed = true
+						return nil
+					}
+					return c.Create(ctx, obj, opts...)
+				}}).Build()
+
+			ready, detail, err := praxisControllerCanReadGateway(context.Background(), cl, "controller-ns", "openshift-ingress", "praxis-gateway")
+			require.NoError(t, err)
+			if tt.includePeer {
+				assert.True(t, ready, detail)
+				assert.Empty(t, detail)
+				assert.Equal(t, 3, reviews)
+			} else {
+				assert.False(t, ready)
+				assert.Contains(t, detail, "deployment not found")
+				assert.Zero(t, reviews)
+			}
+		})
+	}
 }
 
 func deepCopyPatch(t *testing.T, patch map[string]any) map[string]any {
@@ -610,7 +653,7 @@ func TestReconcilePayloadProcessingSwitch_GatewayAccessPreflight(t *testing.T) {
 			).WithInterceptorFuncs(gatewayAccessReviews(t, tt.deniedVerb)).Build()
 			params := PlatformParams{
 				SkipIPP: true, GatewayNamespace: gwNS, GatewayName: gwName,
-				ModelNamespace: appNs, TenantIdentifier: tenantName,
+				ModelNamespace: appNs, TenantIdentifier: tenantName, ControllerNamespace: "controller-ns",
 			}
 			outcome, err := reconcilePayloadProcessingSwitch(ctx, cl, tenant, &params, mcfg, logr.Discard())
 			require.NoError(t, err)
