@@ -1423,6 +1423,7 @@ def extproc_deployment_uses_praxis(
         "odh-praxis-extproc" in image
         or "praxis-extproc" in image
         or "/etc/praxis/extproc.yaml" in args
+        or "/etc/praxis/pre-extproc.yaml" in args
     )
 
 

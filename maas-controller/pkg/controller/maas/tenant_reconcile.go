@@ -204,7 +204,7 @@ func (r *TenantReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctr
 	r.attemptLegacyCleanup(ctx, log)
 
 	// Set final status
-	return r.setFinalStatus(ctx, &tenant)
+	return r.setFinalStatus(ctx, &tenant, runRes)
 }
 
 func (r *TenantReconciler) handleDeletion(ctx context.Context, log logr.Logger, tenant *maasv1alpha1.MaasTenantConfig) (ctrl.Result, error) {
@@ -521,17 +521,26 @@ func (r *TenantReconciler) attemptLegacyCleanup(ctx context.Context, log logr.Lo
 	}
 }
 
-func (r *TenantReconciler) setFinalStatus(ctx context.Context, tenant *maasv1alpha1.MaasTenantConfig) (ctrl.Result, error) {
+func (r *TenantReconciler) setFinalStatus(ctx context.Context, tenant *maasv1alpha1.MaasTenantConfig, runRes *tenantreconcile.RunResult) (ctrl.Result, error) {
 	tenant.Status.Phase = "Active"
 	if apimeta.IsStatusConditionTrue(tenant.Status.Conditions, tenantreconcile.ConditionTypeDegraded) {
 		tenant.Status.Phase = "Degraded"
 	}
-	setDeploymentsAvailableCondition(tenant, true, "DeploymentsReady", "maas-api deployment and payload-processing EnvoyFilter are available")
+	readyMessage := "MaaS platform manifests applied and maas-api deployment is available"
+	if runRes.PraxisUnavailable != "" {
+		// Keep the tenant active so ai-gateway-controller can reconcile Praxis.
+		// Its operands are owned by that controller, but their absence must not
+		// be reported as DeploymentsAvailable.
+		setDeploymentsAvailableCondition(tenant, false, "PayloadProcessingNotReady", runRes.PraxisUnavailable)
+		readyMessage = "MaaS platform is available for Praxis reconciliation; payload processing is not yet available"
+	} else {
+		setDeploymentsAvailableCondition(tenant, true, "DeploymentsReady", "maas-api deployment and payload-processing EnvoyFilter are available")
+	}
 	apimeta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
 		Type:               tenantreconcile.ReadyConditionType,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Reconciled",
-		Message:            "MaaS platform manifests applied and maas-api deployment is available",
+		Message:            readyMessage,
 		ObservedGeneration: tenant.Generation,
 		LastTransitionTime: metav1.Now(),
 	})
@@ -539,6 +548,9 @@ func (r *TenantReconciler) setFinalStatus(ctx context.Context, tenant *maasv1alp
 		return ctrl.Result{}, err
 	}
 
+	if runRes.PraxisUnavailable != "" {
+		return ctrl.Result{RequeueAfter: 20 * time.Second}, nil
+	}
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 

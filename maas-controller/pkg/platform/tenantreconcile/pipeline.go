@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -28,6 +29,8 @@ import (
 type RunResult struct {
 	DeploymentPending bool
 	Detail            string
+	// PraxisUnavailable reports missing peer operands without delaying tenant activation.
+	PraxisUnavailable string
 	// Warnings contains non-fatal issues discovered during reconciliation
 	// (e.g. invalid replica-count annotations) that should be surfaced as status conditions.
 	Warnings []string
@@ -161,6 +164,10 @@ func RunPlatform(
 		return &RunResult{DeploymentPending: true, Detail: withMigrationBlockedDetail(detail, switchOutcome.blockedReason), Warnings: params.Warnings,
 			KuadrantDetectionWarning: params.KuadrantDetectionWarning}, nil
 	}
+	if switchOutcome.blockedReason != "" {
+		return &RunResult{DeploymentPending: true, Detail: switchOutcome.blockedReason, Warnings: params.Warnings,
+			KuadrantDetectionWarning: params.KuadrantDetectionWarning}, nil
+	}
 	if !params.SkipIPP {
 		ready, detail, err = PayloadProcessingEnvoyFilterReady(ctx, c, params.GatewayNamespace, params.GatewayName, tenantID)
 		if err != nil {
@@ -170,10 +177,15 @@ func RunPlatform(
 			return &RunResult{DeploymentPending: true, Detail: withMigrationBlockedDetail(detail, switchOutcome.blockedReason), Warnings: params.Warnings,
 				KuadrantDetectionWarning: params.KuadrantDetectionWarning}, nil
 		}
-	}
-	if switchOutcome.blockedReason != "" {
-		return &RunResult{DeploymentPending: true, Detail: switchOutcome.blockedReason, Warnings: params.Warnings,
-			KuadrantDetectionWarning: params.KuadrantDetectionWarning}, nil
+	} else {
+		ready, detail, err = PraxisPayloadProcessingReady(ctx, c, params.GatewayNamespace, params.GatewayName, tenantID)
+		if err != nil {
+			return nil, fmt.Errorf("praxis payload-processing status: %w", err)
+		}
+		if !ready {
+			return &RunResult{PraxisUnavailable: detail, Warnings: params.Warnings,
+				KuadrantDetectionWarning: params.KuadrantDetectionWarning}, nil
+		}
 	}
 	return &RunResult{Warnings: params.Warnings, KuadrantDetectionWarning: params.KuadrantDetectionWarning}, nil
 }
@@ -233,6 +245,8 @@ func reconcilePayloadProcessingSwitch(
 				return payloadProcessingSwitchOutcome{blockedReason: gate.Reason}, nil
 			}
 			log.Info("plugins ConfigMap migration gate allow", "baseline", gate.Baseline, "reason", gate.Reason)
+			// The peer reuses these names and waits for cleanup-complete. A
+			// gap-free swap requires a coordinated protocol change in both controllers.
 			if err := cleanupIPPResources(ctx, c, *params, mcfg.UID, log); err != nil {
 				return payloadProcessingSwitchOutcome{}, fmt.Errorf("cleanup IPP resources: %w", err)
 			}
@@ -424,6 +438,74 @@ func PayloadProcessingEnvoyFilterReady(ctx context.Context, c client.Client, gat
 		return false, fmt.Sprintf(
 			"EnvoyFilter %s/%s workloadSelector.labels[%q]=%q; expected gateway %q",
 			gatewayNamespace, efName, gatewayNameLabel, got, gatewayName), nil
+	}
+	return true, "", nil
+}
+
+// PraxisPayloadProcessingReady checks peer-owned body-routing operands without IPP's filter priority rule.
+func PraxisPayloadProcessingReady(ctx context.Context, c client.Client, gatewayNamespace, gatewayName, tenantID string) (bool, string, error) {
+	for _, operand := range []struct{ name, configPath string }{
+		{PayloadPreProcessingDeploymentName(tenantID), "/etc/praxis/pre-extproc.yaml"},
+		{PayloadProcessingDeploymentName(tenantID), "/etc/praxis/extproc.yaml"},
+	} {
+		dep := &appsv1.Deployment{}
+		key := types.NamespacedName{Namespace: gatewayNamespace, Name: operand.name}
+		if err := c.Get(ctx, key, dep); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, fmt.Sprintf("Praxis deployment %s not found", key), nil
+			}
+			return false, "", err
+		}
+		hasRoleConfig := false
+		for _, container := range dep.Spec.Template.Spec.Containers {
+			for _, argv := range [][]string{container.Command, container.Args} {
+				for _, arg := range argv {
+					if strings.Contains(arg, operand.configPath) {
+						hasRoleConfig = true
+						break
+					}
+				}
+			}
+		}
+		if !hasRoleConfig {
+			return false, fmt.Sprintf("deployment %s does not use Praxis config %s", key, operand.configPath), nil
+		}
+		desired := int32(1)
+		if dep.Spec.Replicas != nil {
+			desired = *dep.Spec.Replicas
+		}
+		if desired < 1 || dep.Status.ObservedGeneration < dep.Generation || dep.Status.UpdatedReplicas < desired || dep.Status.AvailableReplicas < desired {
+			return false, fmt.Sprintf("Praxis deployment %s is not available", key), nil
+		}
+	}
+
+	for _, name := range []string{PayloadPreProcessingServiceName(tenantID), PayloadProcessingServiceName(tenantID)} {
+		key := types.NamespacedName{Namespace: gatewayNamespace, Name: name}
+		if err := c.Get(ctx, key, &corev1.Service{}); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, fmt.Sprintf("Praxis Service %s not found", key), nil
+			}
+			return false, "", err
+		}
+	}
+
+	efName := PayloadProcessingEnvoyFilterName(tenantID)
+	ef := &unstructured.Unstructured{}
+	ef.SetGroupVersionKind(GVKEnvoyFilter)
+	key := types.NamespacedName{Namespace: gatewayNamespace, Name: efName}
+	if err := c.Get(ctx, key, ef); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, fmt.Sprintf("Praxis EnvoyFilter %s not found", key), nil
+		}
+		return false, "", err
+	}
+	labels, _, err := unstructured.NestedStringMap(ef.Object, "spec", "workloadSelector", "labels")
+	if err != nil {
+		return false, "", fmt.Errorf("read Praxis EnvoyFilter workloadSelector: %w", err)
+	}
+	const gatewayNameLabel = "gateway.networking.k8s.io/gateway-name"
+	if labels[gatewayNameLabel] != gatewayName {
+		return false, fmt.Sprintf("Praxis EnvoyFilter %s does not select gateway %s", key, gatewayName), nil
 	}
 	return true, "", nil
 }

@@ -185,6 +185,7 @@ func TestRunPlatform_PraxisSkipsIPPApply(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.DeploymentPending, "praxis tenant should not wait on IPP EnvoyFilter: %s", result.Detail)
+	assert.Contains(t, result.PraxisUnavailable, "Praxis deployment")
 
 	hasMaaSAPIDeployment := false
 	for _, res := range applied {
@@ -196,6 +197,79 @@ func TestRunPlatform_PraxisSkipsIPPApply(t *testing.T) {
 		}
 	}
 	assert.True(t, hasMaaSAPIDeployment, "expected maas-api Deployment to be applied")
+}
+
+func readyPraxisDeployment(namespace, name, configPath string) *appsv1.Deployment {
+	dep := readyMaaSAPIDeployment(namespace, "")
+	dep.Name = name
+	dep.Spec.Template.Spec.Containers[0].Image = "example/odh-praxis-extproc:test"
+	dep.Spec.Template.Spec.Containers[0].Args = []string{"--config", configPath}
+	return dep
+}
+
+func TestPraxisPayloadProcessingReady(t *testing.T) {
+	const (
+		gwNS     = "openshift-ingress"
+		gwName   = "team-gateway"
+		tenantID = "team"
+	)
+	processing := readyPraxisDeployment(gwNS, PayloadProcessingDeploymentName(tenantID), "/etc/praxis/extproc.yaml")
+	preProcessing := readyPraxisDeployment(gwNS, PayloadPreProcessingDeploymentName(tenantID), "/etc/praxis/pre-extproc.yaml")
+	processingService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: PayloadProcessingServiceName(tenantID), Namespace: gwNS}}
+	preProcessingService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: PayloadPreProcessingServiceName(tenantID), Namespace: gwNS}}
+	ef := payloadProcessingEnvoyFilter(gwNS, PayloadProcessingEnvoyFilterName(tenantID), gwName, nil)
+	mirroredPreProcessing := preProcessing.DeepCopy()
+	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Image = "registry.example/custom:latest"
+	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Args = nil
+	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Command = []string{"praxis", "--config=/etc/praxis/pre-extproc.yaml"}
+	mirroredProcessing := processing.DeepCopy()
+	mirroredProcessing.Spec.Template.Spec.Containers[0].Image = "registry.example/custom:latest"
+	mirroredProcessing.Spec.Template.Spec.Containers[0].Args = []string{"--config", "/etc/praxis/extproc.yaml"}
+	wrongPreProcessing := mirroredPreProcessing.DeepCopy()
+	wrongPreProcessing.Spec.Template.Spec.Containers[0].Command = []string{"praxis", "--config=/etc/praxis/extproc.yaml"}
+	wrongPraxisPreProcessing := preProcessing.DeepCopy()
+	wrongPraxisPreProcessing.Spec.Template.Spec.Containers[0].Args = []string{"--config", "/etc/praxis/extproc.yaml"}
+	wrongPraxisProcessing := processing.DeepCopy()
+	wrongPraxisProcessing.Spec.Template.Spec.Containers[0].Args = []string{"--config", "/etc/praxis/pre-extproc.yaml"}
+
+	tests := []struct {
+		name   string
+		seed   []client.Object
+		detail string
+		ready  bool
+	}{
+		{name: "missing deployment", detail: "Praxis deployment"},
+		{name: "legacy deployment", seed: []client.Object{func() client.Object {
+			dep := preProcessing.DeepCopy()
+			dep.Spec.Template.Spec.Containers[0].Image = "example/legacy-ipp:test"
+			dep.Spec.Template.Spec.Containers[0].Args = nil
+			return dep
+		}()}, detail: "does not use Praxis config"},
+		{name: "unavailable deployment", seed: []client.Object{func() client.Object {
+			dep := preProcessing.DeepCopy()
+			dep.Status.AvailableReplicas = 0
+			return dep
+		}()}, detail: "not available"},
+		{name: "wrong mirrored pre-processing config", seed: []client.Object{wrongPreProcessing}, detail: "does not use Praxis config"},
+		{name: "wrong normal-image pre-processing config", seed: []client.Object{wrongPraxisPreProcessing}, detail: "does not use Praxis config"},
+		{name: "wrong normal-image processing config", seed: []client.Object{preProcessing, wrongPraxisProcessing}, detail: "does not use Praxis config"},
+		{name: "missing service", seed: []client.Object{preProcessing, processing}, detail: "Praxis Service"},
+		{name: "missing EnvoyFilter", seed: []client.Object{preProcessing, processing, preProcessingService, processingService}, detail: "Praxis EnvoyFilter"},
+		{name: "wrong gateway", seed: []client.Object{preProcessing, processing, preProcessingService, processingService,
+			payloadProcessingEnvoyFilter(gwNS, PayloadProcessingEnvoyFilterName(tenantID), "other-gateway", nil)}, detail: "does not select gateway"},
+		{name: "ready", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, ef}, ready: true},
+		{name: "ready with mirrored images", seed: []client.Object{mirroredPreProcessing, mirroredProcessing,
+			preProcessingService, processingService, ef}, ready: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithScheme(praxisTestScheme(t)).WithObjects(tt.seed...).Build()
+			ready, detail, err := PraxisPayloadProcessingReady(context.Background(), cl, gwNS, gwName, tenantID)
+			require.NoError(t, err)
+			assert.Equal(t, tt.ready, ready)
+			assert.Contains(t, detail, tt.detail)
+		})
+	}
 }
 
 func TestRunPlatform_PraxisCleansUpExistingIPPResources(t *testing.T) {
