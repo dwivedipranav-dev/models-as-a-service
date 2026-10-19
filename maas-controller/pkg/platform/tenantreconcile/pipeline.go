@@ -457,15 +457,10 @@ func PraxisPayloadProcessingReady(ctx context.Context, c client.Client, gatewayN
 			return false, "", err
 		}
 		hasRoleConfig := false
-		for _, container := range dep.Spec.Template.Spec.Containers {
-			for _, argv := range [][]string{container.Command, container.Args} {
-				for _, arg := range argv {
-					if strings.Contains(arg, operand.configPath) {
-						hasRoleConfig = true
-						break
-					}
-				}
-			}
+		if len(dep.Spec.Template.Spec.Containers) > 0 {
+			container := dep.Spec.Template.Spec.Containers[0]
+			argv := append(append([]string{}, container.Command...), container.Args...)
+			hasRoleConfig = praxisConfigPath(argv) == operand.configPath
 		}
 		if !hasRoleConfig {
 			return false, fmt.Sprintf("deployment %s does not use Praxis config %s", key, operand.configPath), nil
@@ -507,7 +502,69 @@ func PraxisPayloadProcessingReady(ctx context.Context, c client.Client, gatewayN
 	if labels[gatewayNameLabel] != gatewayName {
 		return false, fmt.Sprintf("Praxis EnvoyFilter %s does not select gateway %s", key, gatewayName), nil
 	}
+	patches, _, err := unstructured.NestedSlice(ef.Object, "spec", "configPatches")
+	if err != nil {
+		return false, "", fmt.Errorf("read Praxis EnvoyFilter configPatches: %w", err)
+	}
+	if !hasPraxisExtProcPatch(patches, "envoy.filters.http.ext_proc.ipp-pre", "payload-pre-processing-extproc",
+		PayloadPreProcessingServiceName(tenantID), gatewayNamespace) {
+		return false, fmt.Sprintf("Praxis EnvoyFilter %s has no pre-processing HTTP_FILTER patch", key), nil
+	}
+	if !hasPraxisExtProcPatch(patches, "envoy.filters.http.ext_proc.ipp", "payload-processing-extproc",
+		PayloadProcessingServiceName(tenantID), gatewayNamespace) {
+		return false, fmt.Sprintf("Praxis EnvoyFilter %s has no processing HTTP_FILTER patch", key), nil
+	}
 	return true, "", nil
+}
+
+func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName, gatewayNamespace string) bool {
+	for _, raw := range patches {
+		patch, ok := raw.(map[string]any)
+		if !ok || patch["applyTo"] != "HTTP_FILTER" {
+			continue
+		}
+		patchSpec, ok := patch["patch"].(map[string]any)
+		if !ok || (patchSpec["operation"] != "INSERT_BEFORE" && patchSpec["operation"] != "INSERT_AFTER") {
+			continue
+		}
+		value, ok := patchSpec["value"].(map[string]any)
+		if !ok || value["name"] != filterName {
+			continue
+		}
+		config, ok := value["typed_config"].(map[string]any)
+		if !ok || config["@type"] != "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor" {
+			continue
+		}
+		grpcService, ok := config["grpc_service"].(map[string]any)
+		if !ok {
+			continue
+		}
+		envoyGRPC, ok := grpcService["envoy_grpc"].(map[string]any)
+		if !ok {
+			continue
+		}
+		cluster, ok := envoyGRPC["cluster_name"].(string)
+		if ok && (cluster == fixedCluster ||
+			strings.Contains(cluster, fixedCluster+"."+gatewayNamespace+".svc") ||
+			strings.Contains(cluster, serviceName+"."+gatewayNamespace+".svc")) {
+			return true
+		}
+	}
+	return false
+}
+
+// praxisConfigPath returns the final --config value from the container's argv.
+func praxisConfigPath(argv []string) string {
+	var config string
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "--config" && i+1 < len(argv) {
+			config = argv[i+1]
+			i++
+		} else if strings.HasPrefix(argv[i], "--config=") {
+			config = strings.TrimPrefix(argv[i], "--config=")
+		}
+	}
+	return config
 }
 
 const aiGatewayControllerFieldOwner = "ai-gateway-controller"

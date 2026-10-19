@@ -207,6 +207,26 @@ func readyPraxisDeployment(namespace, name, configPath string) *appsv1.Deploymen
 	return dep
 }
 
+func TestPraxisConfigPath(t *testing.T) {
+	const path = "/etc/praxis/extproc.yaml"
+	for _, tt := range []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "separate value", argv: []string{"praxis", "--config", path}, want: path},
+		{name: "equals value", argv: []string{"praxis", "--config=" + path}, want: path},
+		{name: "suffixed value", argv: []string{"--config=" + path + ".backup"}, want: path + ".backup"},
+		{name: "bare path", argv: []string{path}},
+		{name: "different option", argv: []string{"--other-config=" + path}},
+		{name: "final option wins", argv: []string{"--config", path, "--config=" + path + ".backup"}, want: path + ".backup"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, praxisConfigPath(tt.argv))
+		})
+	}
+}
+
 func TestPraxisPayloadProcessingReady(t *testing.T) {
 	const (
 		gwNS     = "openshift-ingress"
@@ -218,6 +238,44 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	processingService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: PayloadProcessingServiceName(tenantID), Namespace: gwNS}}
 	preProcessingService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: PayloadPreProcessingServiceName(tenantID), Namespace: gwNS}}
 	ef := payloadProcessingEnvoyFilter(gwNS, PayloadProcessingEnvoyFilterName(tenantID), gwName, nil)
+	processingPatch := map[string]any{
+		"applyTo": "HTTP_FILTER",
+		"patch": map[string]any{
+			"operation": "INSERT_AFTER",
+			"value": map[string]any{
+				"name": "envoy.filters.http.ext_proc.ipp",
+				"typed_config": map[string]any{
+					"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor",
+					"grpc_service": map[string]any{
+						"envoy_grpc": map[string]any{"cluster_name": "outbound|9004||payload-processing-team.openshift-ingress.svc.cluster.local"},
+					},
+				},
+			},
+		},
+	}
+	preProcessingPatch := runtime.DeepCopyJSONValue(processingPatch).(map[string]any)
+	require.NoError(t, unstructured.SetNestedField(preProcessingPatch, "envoy.filters.http.ext_proc.ipp-pre", "patch", "value", "name"))
+	require.NoError(t, unstructured.SetNestedField(preProcessingPatch, "outbound|9004||payload-pre-processing-team.openshift-ingress.svc.cluster.local",
+		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
+	require.NoError(t, unstructured.SetNestedSlice(ef.Object, []any{preProcessingPatch, processingPatch}, "spec", "configPatches"))
+	missingPatch := payloadProcessingEnvoyFilter(gwNS, PayloadProcessingEnvoyFilterName(tenantID), gwName, nil)
+	missingPrePatch := ef.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(missingPrePatch.Object, []any{processingPatch}, "spec", "configPatches"))
+	missingProcessingPatch := ef.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(missingProcessingPatch.Object, []any{preProcessingPatch}, "spec", "configPatches"))
+	wrongPatch := ef.DeepCopy()
+	wrongProcessingPatch := runtime.DeepCopyJSONValue(processingPatch).(map[string]any)
+	require.NoError(t, unstructured.SetNestedField(wrongProcessingPatch, "other-service.openshift-ingress.svc.cluster.local",
+		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
+	require.NoError(t, unstructured.SetNestedSlice(wrongPatch.Object, []any{preProcessingPatch, wrongProcessingPatch}, "spec", "configPatches"))
+	fixedClusterEF := ef.DeepCopy()
+	fixedPreProcessingPatch := runtime.DeepCopyJSONValue(preProcessingPatch).(map[string]any)
+	require.NoError(t, unstructured.SetNestedField(fixedPreProcessingPatch, "payload-pre-processing-extproc",
+		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
+	fixedProcessingPatch := runtime.DeepCopyJSONValue(processingPatch).(map[string]any)
+	require.NoError(t, unstructured.SetNestedField(fixedProcessingPatch, "payload-processing-extproc",
+		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
+	require.NoError(t, unstructured.SetNestedSlice(fixedClusterEF.Object, []any{fixedPreProcessingPatch, fixedProcessingPatch}, "spec", "configPatches"))
 	mirroredPreProcessing := preProcessing.DeepCopy()
 	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Image = "registry.example/custom:latest"
 	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Args = nil
@@ -231,6 +289,10 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	wrongPraxisPreProcessing.Spec.Template.Spec.Containers[0].Args = []string{"--config", "/etc/praxis/extproc.yaml"}
 	wrongPraxisProcessing := processing.DeepCopy()
 	wrongPraxisProcessing.Spec.Template.Spec.Containers[0].Args = []string{"--config", "/etc/praxis/pre-extproc.yaml"}
+	backupProcessing := processing.DeepCopy()
+	backupProcessing.Spec.Template.Spec.Containers[0].Args = []string{"--config=/etc/praxis/extproc.yaml.backup"}
+	barePathProcessing := processing.DeepCopy()
+	barePathProcessing.Spec.Template.Spec.Containers[0].Args = []string{"/etc/praxis/extproc.yaml"}
 
 	tests := []struct {
 		name   string
@@ -253,11 +315,19 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 		{name: "wrong mirrored pre-processing config", seed: []client.Object{wrongPreProcessing}, detail: "does not use Praxis config"},
 		{name: "wrong normal-image pre-processing config", seed: []client.Object{wrongPraxisPreProcessing}, detail: "does not use Praxis config"},
 		{name: "wrong normal-image processing config", seed: []client.Object{preProcessing, wrongPraxisProcessing}, detail: "does not use Praxis config"},
+		{name: "backup processing config", seed: []client.Object{preProcessing, backupProcessing}, detail: "does not use Praxis config"},
+		{name: "path without config option", seed: []client.Object{preProcessing, barePathProcessing}, detail: "does not use Praxis config"},
 		{name: "missing service", seed: []client.Object{preProcessing, processing}, detail: "Praxis Service"},
 		{name: "missing EnvoyFilter", seed: []client.Object{preProcessing, processing, preProcessingService, processingService}, detail: "Praxis EnvoyFilter"},
 		{name: "wrong gateway", seed: []client.Object{preProcessing, processing, preProcessingService, processingService,
 			payloadProcessingEnvoyFilter(gwNS, PayloadProcessingEnvoyFilterName(tenantID), "other-gateway", nil)}, detail: "does not select gateway"},
+		{name: "missing config patches", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingPatch}, detail: "has no pre-processing HTTP_FILTER patch"},
+		{name: "missing pre-processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingPrePatch}, detail: "has no pre-processing HTTP_FILTER patch"},
+		{name: "missing processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingProcessingPatch}, detail: "has no processing HTTP_FILTER patch"},
+		{name: "wrong processing patch cluster", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, wrongPatch}, detail: "has no processing HTTP_FILTER patch"},
 		{name: "ready", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, ef}, ready: true},
+		{name: "ready with fixed Praxis cluster names", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, fixedClusterEF}, ready: true},
 		{name: "ready with mirrored images", seed: []client.Object{mirroredPreProcessing, mirroredProcessing,
 			preProcessingService, processingService, ef}, ready: true},
 	}

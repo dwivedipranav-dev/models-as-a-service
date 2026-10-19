@@ -1415,15 +1415,30 @@ def extproc_deployment_uses_praxis(
         ],
         timeout=60,
     )
+    command_result = _oc_run(
+        [
+            "get",
+            "deployment",
+            deployment_name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.spec.template.spec.containers[0].command}",
+        ],
+        timeout=60,
+    )
     if image_result.returncode != 0:
         return False
     image = (image_result.stdout or "").strip()
     args = (args_result.stdout or "").strip() if args_result.returncode == 0 else ""
+    command = (command_result.stdout or "").strip() if command_result.returncode == 0 else ""
     return (
         "odh-praxis-extproc" in image
         or "praxis-extproc" in image
         or "/etc/praxis/extproc.yaml" in args
         or "/etc/praxis/pre-extproc.yaml" in args
+        or "/etc/praxis/extproc.yaml" in command
+        or "/etc/praxis/pre-extproc.yaml" in command
     )
 
 
