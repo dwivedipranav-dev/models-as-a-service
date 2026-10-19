@@ -518,6 +518,7 @@ func PraxisPayloadProcessingReady(ctx context.Context, c client.Client, gatewayN
 }
 
 func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName, gatewayNamespace string) bool {
+	outboundCluster := "outbound|9004||" + serviceName + "." + gatewayNamespace + ".svc.cluster.local"
 	for _, raw := range patches {
 		patch, ok := raw.(map[string]any)
 		if !ok || patch["applyTo"] != "HTTP_FILTER" {
@@ -545,7 +546,7 @@ func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName,
 		}
 		cluster, ok := envoyGRPC["cluster_name"].(string)
 		if ok && ((cluster == fixedCluster && hasPraxisClusterAddPatch(patches, fixedCluster, serviceName, gatewayNamespace)) ||
-			strings.Contains(cluster, serviceName+"."+gatewayNamespace+".svc")) {
+			cluster == outboundCluster) {
 			return true
 		}
 	}
@@ -622,8 +623,8 @@ func praxisConfigPath(argv []string) string {
 		if (argv[i] == "--config" || argv[i] == "-c") && i+1 < len(argv) {
 			config = argv[i+1]
 			i++
-		} else if strings.HasPrefix(argv[i], "--config=") {
-			config = strings.TrimPrefix(argv[i], "--config=")
+		} else if value, ok := strings.CutPrefix(argv[i], "--config="); ok {
+			config = value
 		}
 	}
 	return config

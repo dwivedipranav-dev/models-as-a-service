@@ -207,6 +207,13 @@ func readyPraxisDeployment(namespace, name, configPath string) *appsv1.Deploymen
 	return dep
 }
 
+func deepCopyPatch(t *testing.T, patch map[string]any) map[string]any {
+	t.Helper()
+	out, ok := runtime.DeepCopyJSONValue(patch).(map[string]any)
+	require.True(t, ok)
+	return out
+}
+
 func TestPraxisConfigPath(t *testing.T) {
 	const path = "/etc/praxis/extproc.yaml"
 	for _, tt := range []struct {
@@ -256,7 +263,7 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 			},
 		},
 	}
-	preProcessingPatch := runtime.DeepCopyJSONValue(processingPatch).(map[string]any)
+	preProcessingPatch := deepCopyPatch(t, processingPatch)
 	require.NoError(t, unstructured.SetNestedField(preProcessingPatch, "envoy.filters.http.ext_proc.ipp-pre", "patch", "value", "name"))
 	require.NoError(t, unstructured.SetNestedField(preProcessingPatch, "outbound|9004||payload-pre-processing-team.openshift-ingress.svc.cluster.local",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
@@ -267,21 +274,35 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	missingProcessingPatch := ef.DeepCopy()
 	require.NoError(t, unstructured.SetNestedSlice(missingProcessingPatch.Object, []any{preProcessingPatch}, "spec", "configPatches"))
 	wrongPatch := ef.DeepCopy()
-	wrongProcessingPatch := runtime.DeepCopyJSONValue(processingPatch).(map[string]any)
+	wrongProcessingPatch := deepCopyPatch(t, processingPatch)
 	require.NoError(t, unstructured.SetNestedField(wrongProcessingPatch, "other-service.openshift-ingress.svc.cluster.local",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
 	require.NoError(t, unstructured.SetNestedSlice(wrongPatch.Object, []any{preProcessingPatch, wrongProcessingPatch}, "spec", "configPatches"))
+	wrongServicePortPatch := ef.DeepCopy()
+	wrongServicePortProcessingPatch := deepCopyPatch(t, processingPatch)
+	require.NoError(t, unstructured.SetNestedField(wrongServicePortProcessingPatch,
+		"outbound|9005||payload-processing-team.openshift-ingress.svc.cluster.local",
+		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
+	require.NoError(t, unstructured.SetNestedSlice(wrongServicePortPatch.Object,
+		[]any{preProcessingPatch, wrongServicePortProcessingPatch}, "spec", "configPatches"))
+	prefixedServicePatch := ef.DeepCopy()
+	prefixedServiceProcessingPatch := deepCopyPatch(t, processingPatch)
+	require.NoError(t, unstructured.SetNestedField(prefixedServiceProcessingPatch,
+		"outbound|9004||evil-payload-processing-team.openshift-ingress.svc.cluster.local",
+		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
+	require.NoError(t, unstructured.SetNestedSlice(prefixedServicePatch.Object,
+		[]any{preProcessingPatch, prefixedServiceProcessingPatch}, "spec", "configPatches"))
 	fixedClusterNoAddEF := ef.DeepCopy()
-	fixedPreProcessingPatch := runtime.DeepCopyJSONValue(preProcessingPatch).(map[string]any)
+	fixedPreProcessingPatch := deepCopyPatch(t, preProcessingPatch)
 	require.NoError(t, unstructured.SetNestedField(fixedPreProcessingPatch, "payload-pre-processing-extproc",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
-	fixedProcessingPatch := runtime.DeepCopyJSONValue(processingPatch).(map[string]any)
+	fixedProcessingPatch := deepCopyPatch(t, processingPatch)
 	require.NoError(t, unstructured.SetNestedField(fixedProcessingPatch, "payload-processing-extproc",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
 	require.NoError(t, unstructured.SetNestedSlice(fixedClusterNoAddEF.Object, []any{fixedPreProcessingPatch, fixedProcessingPatch}, "spec", "configPatches"))
 	clusterAddPatch := func(name, serviceName string, port int64) map[string]any {
 		socketAddress := map[string]any{
-			"address": serviceName + "." + gwNS + ".svc.cluster.local",
+			"address":    serviceName + "." + gwNS + ".svc.cluster.local",
 			"port_value": port,
 		}
 		endpoint := map[string]any{"address": map[string]any{"socket_address": socketAddress}}
@@ -315,7 +336,7 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	missingProcessingClusterEF := fixedClusterNoAddEF.DeepCopy()
 	require.NoError(t, unstructured.SetNestedSlice(missingProcessingClusterEF.Object,
 		[]any{fixedPreProcessingPatch, fixedProcessingPatch, preClusterAdd}, "spec", "configPatches"))
-	missingEndpointAdd := runtime.DeepCopyJSONValue(preClusterAdd).(map[string]any)
+	missingEndpointAdd := deepCopyPatch(t, preClusterAdd)
 	unstructured.RemoveNestedField(missingEndpointAdd, "patch", "value", "load_assignment")
 	missingEndpointEF := fixedClusterNoAddEF.DeepCopy()
 	require.NoError(t, unstructured.SetNestedSlice(missingEndpointEF.Object,
@@ -379,6 +400,10 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 		{name: "missing pre-processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingPrePatch}, detail: "has no pre-processing HTTP_FILTER patch"},
 		{name: "missing processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingProcessingPatch}, detail: "has no processing HTTP_FILTER patch"},
 		{name: "wrong processing patch cluster", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, wrongPatch}, detail: "has no processing HTTP_FILTER patch"},
+		{name: "processing patch cluster uses wrong port", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, wrongServicePortPatch}, detail: "has no processing HTTP_FILTER patch"},
+		{name: "processing patch cluster uses prefixed service", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, prefixedServicePatch}, detail: "has no processing HTTP_FILTER patch"},
 		{name: "fixed clusters without ADD patches", seed: []client.Object{preProcessing, processing,
 			preProcessingService, processingService, fixedClusterNoAddEF}, detail: "matching CLUSTER ADD patch"},
 		{name: "fixed pre-processing cluster without ADD patch", seed: []client.Object{preProcessing, processing,
