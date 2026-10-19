@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -205,6 +206,39 @@ func readyPraxisDeployment(namespace, name, configPath string) *appsv1.Deploymen
 	dep.Spec.Template.Spec.Containers[0].Image = "example/odh-praxis-extproc:test"
 	dep.Spec.Template.Spec.Containers[0].Args = []string{"-c", configPath}
 	return dep
+}
+
+func readyPraxisControllerDeployment() *appsv1.Deployment {
+	dep := readyMaaSAPIDeployment("controller-ns", "")
+	dep.Name = "ai-gateway-controller"
+	dep.Spec.Selector.MatchLabels["app"] = dep.Name
+	dep.Spec.Template.Labels["app"] = dep.Name
+	dep.Spec.Template.Spec.Containers[0].Name = dep.Name
+	dep.Spec.Template.Spec.ServiceAccountName = "ai-gateway-controller"
+	return dep
+}
+
+func gatewayAccessReviews(t *testing.T, deniedVerb string) interceptor.Funcs {
+	t.Helper()
+	return interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if review, ok := obj.(*authv1.SubjectAccessReview); ok {
+			require.Equal(t, "system:serviceaccount:controller-ns:ai-gateway-controller", review.Spec.User)
+			attributes := review.Spec.ResourceAttributes
+			require.NotNil(t, attributes)
+			assert.Equal(t, "gateway.networking.k8s.io", attributes.Group)
+			assert.Equal(t, "gateways", attributes.Resource)
+			if attributes.Verb == "get" {
+				assert.Equal(t, "openshift-ingress", attributes.Namespace)
+				assert.Equal(t, "praxis-gateway", attributes.Name)
+			} else {
+				assert.Empty(t, attributes.Namespace)
+				assert.Empty(t, attributes.Name)
+			}
+			review.Status.Allowed = attributes.Verb != deniedVerb
+			return nil
+		}
+		return c.Create(ctx, obj, opts...)
+	}}
 }
 
 func deepCopyPatch(t *testing.T, patch map[string]any) map[string]any {
@@ -440,7 +474,7 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	}
 }
 
-func TestRunPlatform_PraxisCleansUpExistingIPPResources(t *testing.T) {
+func TestRunPlatform_PraxisRetainsExistingIPPWithoutPeer(t *testing.T) {
 	const (
 		tenantName = "praxis-team"
 		appNs      = "ai-tenant-praxis-team"
@@ -485,6 +519,8 @@ func TestRunPlatform_PraxisCleansUpExistingIPPResources(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	assert.True(t, result.DeploymentPending)
+	assert.Contains(t, result.Detail, "ai-gateway-controller deployment not found")
 
 	depKey := types.NamespacedName{
 		Namespace: gwNS,
@@ -492,8 +528,7 @@ func TestRunPlatform_PraxisCleansUpExistingIPPResources(t *testing.T) {
 	}
 	dep := &unstructured.Unstructured{}
 	dep.SetGroupVersionKind(GVKDeployment)
-	err = cl.Get(context.Background(), depKey, dep)
-	require.True(t, apierrors.IsNotFound(err))
+	require.NoError(t, cl.Get(context.Background(), depKey, dep))
 
 	efKey := types.NamespacedName{
 		Namespace: gwNS,
@@ -501,12 +536,95 @@ func TestRunPlatform_PraxisCleansUpExistingIPPResources(t *testing.T) {
 	}
 	ef := &unstructured.Unstructured{}
 	ef.SetGroupVersionKind(GVKEnvoyFilter)
-	err = cl.Get(context.Background(), efKey, ef)
-	require.True(t, apierrors.IsNotFound(err))
+	require.NoError(t, cl.Get(context.Background(), efKey, ef))
 
 	gotTenant := &maasv1alpha1.MaasTenantConfig{}
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Namespace: appNs, Name: maasv1alpha1.MaasTenantConfigInstanceName}, gotTenant))
-	assert.Equal(t, PayloadProcessingStatusCleanupComplete, gotTenant.Annotations[AnnotationPayloadProcessingStatus])
+	assert.Empty(t, gotTenant.Annotations[AnnotationPayloadProcessingStatus])
+}
+
+func TestReconcilePayloadProcessingSwitch_GatewayAccessPreflight(t *testing.T) {
+	const (
+		tenantName = "praxis-team"
+		appNs      = "ai-tenant-praxis-team"
+		gwNS       = "openshift-ingress"
+		gwName     = "praxis-gateway"
+	)
+	for _, tt := range []struct {
+		name       string
+		deniedVerb string
+		cleanup    bool
+	}{
+		{name: "get denied", deniedVerb: "get"},
+		{name: "list denied", deniedVerb: "list"},
+		{name: "watch denied", deniedVerb: "watch"},
+		{name: "Gateway access granted", cleanup: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := praxisTestScheme(t)
+			tenant := praxisTenantConfig(appNs, tenantName)
+			mcfg := &maasv1alpha1.Config{ObjectMeta: metav1.ObjectMeta{
+				Name: maasv1alpha1.ConfigInstanceName, UID: types.UID("cfg-uid"),
+			}}
+			ippDeployment := unstructuredIPPObject(GVKDeployment, gwNS, PayloadProcessingDeploymentName(tenantName), nil)
+			setConfigControllerOwnerRef(ippDeployment, mcfg.UID)
+			ippEnvoyFilter := unstructuredIPPObject(GVKEnvoyFilter, gwNS, PayloadProcessingEnvoyFilterName(tenantName), nil)
+			setConfigControllerOwnerRef(ippEnvoyFilter, mcfg.UID)
+			cl := newSSAFakeClientBuilder(scheme).WithObjects(
+				tenant, readyPraxisControllerDeployment(), ippDeployment, ippEnvoyFilter,
+			).WithInterceptorFuncs(gatewayAccessReviews(t, tt.deniedVerb)).Build()
+			params := PlatformParams{
+				SkipIPP: true, GatewayNamespace: gwNS, GatewayName: gwName,
+				ModelNamespace: appNs, TenantIdentifier: tenantName,
+			}
+			outcome, err := reconcilePayloadProcessingSwitch(ctx, cl, tenant, &params, mcfg, logr.Discard())
+			require.NoError(t, err)
+			if tt.cleanup {
+				assert.Empty(t, outcome.blockedReason)
+			} else {
+				assert.Contains(t, outcome.blockedReason, "cannot "+tt.deniedVerb+" Gateways")
+			}
+			for _, ref := range []ippResourceRef{
+				{gvk: GVKDeployment, namespace: gwNS, name: PayloadProcessingDeploymentName(tenantName)},
+				{gvk: GVKEnvoyFilter, namespace: gwNS, name: PayloadProcessingEnvoyFilterName(tenantName)},
+			} {
+				obj := &unstructured.Unstructured{}
+				obj.SetGroupVersionKind(ref.gvk)
+				err := cl.Get(ctx, client.ObjectKey{Namespace: ref.namespace, Name: ref.name}, obj)
+				if tt.cleanup {
+					assert.True(t, apierrors.IsNotFound(err), "%s should be removed after access preflight", ref.gvk.Kind)
+				} else {
+					assert.NoError(t, err, "%s must remain while Gateway access is denied", ref.gvk.Kind)
+				}
+			}
+			gotTenant := &maasv1alpha1.MaasTenantConfig{}
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(tenant), gotTenant))
+			if tt.cleanup {
+				assert.Equal(t, PayloadProcessingStatusCleanupComplete, payloadProcessingStatus(gotTenant))
+			} else {
+				assert.Empty(t, payloadProcessingStatus(gotTenant))
+			}
+		})
+	}
+}
+
+func TestHasMaaSOwnedIPPDeployment(t *testing.T) {
+	const gatewayNamespace = "openshift-ingress"
+	params := PlatformParams{GatewayNamespace: gatewayNamespace, TenantIdentifier: "team"}
+	configUID := types.UID("cfg-uid")
+	preProcessing := unstructuredIPPObject(GVKDeployment, gatewayNamespace, PayloadPreProcessingDeploymentName("team"), nil)
+	setConfigControllerOwnerRef(preProcessing, configUID)
+	cl := fake.NewClientBuilder().WithScheme(praxisTestScheme(t)).WithObjects(preProcessing).Build()
+	present, err := hasMaaSOwnedIPPDeployment(context.Background(), cl, params, configUID)
+	require.NoError(t, err)
+	assert.True(t, present, "pre-processing IPP alone must prevent premature cleanup")
+
+	peerOwned := praxisOwnedDeployment(gatewayNamespace, PayloadProcessingDeploymentName("team"))
+	cl = fake.NewClientBuilder().WithScheme(praxisTestScheme(t)).WithObjects(peerOwned).Build()
+	present, err = hasMaaSOwnedIPPDeployment(context.Background(), cl, params, configUID)
+	require.NoError(t, err)
+	assert.False(t, present, "Praxis-owned Deployment must not block stale IPP cleanup")
 }
 
 func TestRunPlatform_PraxisBlocksCleanupForNonStandardPluginsConfigMap(t *testing.T) {
@@ -650,7 +768,8 @@ profiles:
 
 	cl := newSSAFakeClientBuilder(scheme).WithObjects(
 		mcfg, gateway, tenant, readyMaaSAPIDeployment(appNs, tenantName), ippDeployment, pluginsCM,
-	).Build()
+		readyPraxisControllerDeployment(),
+	).WithInterceptorFuncs(gatewayAccessReviews(t, "")).Build()
 
 	result, err := RunPlatform(
 		context.Background(),

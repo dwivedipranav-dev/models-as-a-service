@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
+	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -245,8 +246,22 @@ func reconcilePayloadProcessingSwitch(
 				return payloadProcessingSwitchOutcome{blockedReason: gate.Reason}, nil
 			}
 			log.Info("plugins ConfigMap migration gate allow", "baseline", gate.Baseline, "reason", gate.Reason)
-			// The peer reuses these names and waits for cleanup-complete. A
-			// gap-free swap requires a coordinated protocol change in both controllers.
+			legacyPresent, err := hasMaaSOwnedIPPDeployment(ctx, c, *params, mcfg.UID)
+			if err != nil {
+				return payloadProcessingSwitchOutcome{}, fmt.Errorf("check legacy IPP deployments: %w", err)
+			}
+			if legacyPresent {
+				ready, detail, err := praxisControllerCanReadGateway(ctx, c, params.GatewayNamespace, params.GatewayName)
+				if err != nil {
+					return payloadProcessingSwitchOutcome{}, fmt.Errorf("check Praxis controller Gateway access: %w", err)
+				}
+				if !ready {
+					return payloadProcessingSwitchOutcome{blockedReason: detail}, nil
+				}
+			}
+			// The peer reuses these names and waits for cleanup-complete. This
+			// preflight prevents known access failures, but a gap-free swap still
+			// requires a coordinated protocol change in both controllers.
 			if err := cleanupIPPResources(ctx, c, *params, mcfg.UID, log); err != nil {
 				return payloadProcessingSwitchOutcome{}, fmt.Errorf("cleanup IPP resources: %w", err)
 			}
@@ -282,6 +297,81 @@ func reconcilePayloadProcessingSwitch(
 		return payloadProcessingSwitchOutcome{}, fmt.Errorf("cleanup payload-pre-processing HPA: %w", err)
 	}
 	return payloadProcessingSwitchOutcome{}, nil
+}
+
+// praxisControllerCanReadGateway checks the peer's availability and the Gateway
+// permissions needed before it can reconcile replacement Praxis operands. This
+// is a preflight for an existing IPP stack, not proof that Praxis will deploy.
+func praxisControllerCanReadGateway(ctx context.Context, c client.Client, gatewayNamespace, gatewayName string) (bool, string, error) {
+	deployments := &appsv1.DeploymentList{}
+	if err := c.List(ctx, deployments); err != nil {
+		return false, "", fmt.Errorf("list deployments for ai-gateway-controller: %w", err)
+	}
+	var peer *appsv1.Deployment
+	for i := range deployments.Items {
+		dep := &deployments.Items[i]
+		if dep.Name != "ai-gateway-controller" {
+			continue
+		}
+		if peer != nil {
+			return false, "multiple ai-gateway-controller deployments found; retaining legacy IPP", nil
+		}
+		peer = dep
+	}
+	if peer == nil {
+		return false, "ai-gateway-controller deployment not found; retaining legacy IPP", nil
+	}
+	desired := int32(1)
+	if peer.Spec.Replicas != nil {
+		desired = *peer.Spec.Replicas
+	}
+	if !peer.DeletionTimestamp.IsZero() || desired < 1 || peer.Status.ObservedGeneration < peer.Generation || peer.Status.UpdatedReplicas < desired || peer.Status.AvailableReplicas < desired {
+		return false, fmt.Sprintf("ai-gateway-controller deployment %s/%s is not available; retaining legacy IPP", peer.Namespace, peer.Name), nil
+	}
+	serviceAccount := peer.Spec.Template.Spec.ServiceAccountName
+	if serviceAccount == "" {
+		serviceAccount = "default"
+	}
+	user := fmt.Sprintf("system:serviceaccount:%s:%s", peer.Namespace, serviceAccount)
+	for _, verb := range []string{"get", "list", "watch"} {
+		attributes := &authv1.ResourceAttributes{
+			Verb:      verb,
+			Group:     "gateway.networking.k8s.io",
+			Resource:  "gateways",
+		}
+		if verb == "get" {
+			attributes.Namespace = gatewayNamespace
+			attributes.Name = gatewayName
+		}
+		review := &authv1.SubjectAccessReview{Spec: authv1.SubjectAccessReviewSpec{
+			User: user, ResourceAttributes: attributes,
+		}}
+		if err := c.Create(ctx, review); err != nil {
+			return false, "", fmt.Errorf("review %s Gateway access for %s: %w", verb, user, err)
+		}
+		if !review.Status.Allowed || review.Status.EvaluationError != "" {
+			return false, fmt.Sprintf("ai-gateway-controller service account %s cannot %s Gateways for %s/%s; retaining legacy IPP", user, verb, gatewayNamespace, gatewayName), nil
+		}
+	}
+	return true, "", nil
+}
+
+func hasMaaSOwnedIPPDeployment(ctx context.Context, c client.Client, params PlatformParams, configUID types.UID) (bool, error) {
+	for _, name := range []string{PayloadProcessingDeploymentName(params.TenantIdentifier), PayloadPreProcessingDeploymentName(params.TenantIdentifier)} {
+		dep := &unstructured.Unstructured{}
+		dep.SetGroupVersionKind(GVKDeployment)
+		key := types.NamespacedName{Namespace: params.GatewayNamespace, Name: name}
+		if err := c.Get(ctx, key, dep); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return false, fmt.Errorf("get deployment %s: %w", key, err)
+		}
+		if isMaaSOwnedIPPResource(dep, configUID) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Run executes the Tenant platform pipeline (dependencies → prerequisites → render → apply → status).
