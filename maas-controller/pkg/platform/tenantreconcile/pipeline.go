@@ -508,11 +508,11 @@ func PraxisPayloadProcessingReady(ctx context.Context, c client.Client, gatewayN
 	}
 	if !hasPraxisExtProcPatch(patches, "envoy.filters.http.ext_proc.ipp-pre", "payload-pre-processing-extproc",
 		PayloadPreProcessingServiceName(tenantID), gatewayNamespace) {
-		return false, fmt.Sprintf("Praxis EnvoyFilter %s has no pre-processing HTTP_FILTER patch", key), nil
+		return false, fmt.Sprintf("Praxis EnvoyFilter %s has no pre-processing HTTP_FILTER patch or matching CLUSTER ADD patch", key), nil
 	}
 	if !hasPraxisExtProcPatch(patches, "envoy.filters.http.ext_proc.ipp", "payload-processing-extproc",
 		PayloadProcessingServiceName(tenantID), gatewayNamespace) {
-		return false, fmt.Sprintf("Praxis EnvoyFilter %s has no processing HTTP_FILTER patch", key), nil
+		return false, fmt.Sprintf("Praxis EnvoyFilter %s has no processing HTTP_FILTER patch or matching CLUSTER ADD patch", key), nil
 	}
 	return true, "", nil
 }
@@ -544,8 +544,7 @@ func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName,
 			continue
 		}
 		cluster, ok := envoyGRPC["cluster_name"].(string)
-		if ok && (cluster == fixedCluster ||
-			strings.Contains(cluster, fixedCluster+"."+gatewayNamespace+".svc") ||
+		if ok && ((cluster == fixedCluster && hasPraxisClusterAddPatch(patches, fixedCluster)) ||
 			strings.Contains(cluster, serviceName+"."+gatewayNamespace+".svc")) {
 			return true
 		}
@@ -553,11 +552,33 @@ func hasPraxisExtProcPatch(patches []any, filterName, fixedCluster, serviceName,
 	return false
 }
 
-// praxisConfigPath returns the final --config value from the container's argv.
+func hasPraxisClusterAddPatch(patches []any, clusterName string) bool {
+	for _, raw := range patches {
+		patch, ok := raw.(map[string]any)
+		if !ok || patch["applyTo"] != "CLUSTER" {
+			continue
+		}
+		match, ok := patch["match"].(map[string]any)
+		if !ok || match["context"] != "GATEWAY" {
+			continue
+		}
+		patchSpec, ok := patch["patch"].(map[string]any)
+		if !ok || patchSpec["operation"] != "ADD" {
+			continue
+		}
+		value, ok := patchSpec["value"].(map[string]any)
+		if ok && value["name"] == clusterName {
+			return true
+		}
+	}
+	return false
+}
+
+// praxisConfigPath returns the final config option value from the container's argv.
 func praxisConfigPath(argv []string) string {
 	var config string
 	for i := 0; i < len(argv); i++ {
-		if argv[i] == "--config" && i+1 < len(argv) {
+		if (argv[i] == "--config" || argv[i] == "-c") && i+1 < len(argv) {
 			config = argv[i+1]
 			i++
 		} else if strings.HasPrefix(argv[i], "--config=") {

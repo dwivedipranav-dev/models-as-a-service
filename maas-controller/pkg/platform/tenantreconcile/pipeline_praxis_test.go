@@ -203,7 +203,7 @@ func readyPraxisDeployment(namespace, name, configPath string) *appsv1.Deploymen
 	dep := readyMaaSAPIDeployment(namespace, "")
 	dep.Name = name
 	dep.Spec.Template.Spec.Containers[0].Image = "example/odh-praxis-extproc:test"
-	dep.Spec.Template.Spec.Containers[0].Args = []string{"--config", configPath}
+	dep.Spec.Template.Spec.Containers[0].Args = []string{"-c", configPath}
 	return dep
 }
 
@@ -214,12 +214,15 @@ func TestPraxisConfigPath(t *testing.T) {
 		argv []string
 		want string
 	}{
+		{name: "Praxis short option", argv: []string{"praxis-extproc", "-c", path}, want: path},
 		{name: "separate value", argv: []string{"praxis", "--config", path}, want: path},
 		{name: "equals value", argv: []string{"praxis", "--config=" + path}, want: path},
 		{name: "suffixed value", argv: []string{"--config=" + path + ".backup"}, want: path + ".backup"},
+		{name: "suffixed short-option value", argv: []string{"-c", path + ".backup"}, want: path + ".backup"},
 		{name: "bare path", argv: []string{path}},
 		{name: "different option", argv: []string{"--other-config=" + path}},
 		{name: "final option wins", argv: []string{"--config", path, "--config=" + path + ".backup"}, want: path + ".backup"},
+		{name: "final short option wins", argv: []string{"--config", path, "-c", path + ".backup"}, want: path + ".backup"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, praxisConfigPath(tt.argv))
@@ -268,14 +271,50 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 	require.NoError(t, unstructured.SetNestedField(wrongProcessingPatch, "other-service.openshift-ingress.svc.cluster.local",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
 	require.NoError(t, unstructured.SetNestedSlice(wrongPatch.Object, []any{preProcessingPatch, wrongProcessingPatch}, "spec", "configPatches"))
-	fixedClusterEF := ef.DeepCopy()
+	fixedClusterNoAddEF := ef.DeepCopy()
 	fixedPreProcessingPatch := runtime.DeepCopyJSONValue(preProcessingPatch).(map[string]any)
 	require.NoError(t, unstructured.SetNestedField(fixedPreProcessingPatch, "payload-pre-processing-extproc",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
 	fixedProcessingPatch := runtime.DeepCopyJSONValue(processingPatch).(map[string]any)
 	require.NoError(t, unstructured.SetNestedField(fixedProcessingPatch, "payload-processing-extproc",
 		"patch", "value", "typed_config", "grpc_service", "envoy_grpc", "cluster_name"))
-	require.NoError(t, unstructured.SetNestedSlice(fixedClusterEF.Object, []any{fixedPreProcessingPatch, fixedProcessingPatch}, "spec", "configPatches"))
+	require.NoError(t, unstructured.SetNestedSlice(fixedClusterNoAddEF.Object, []any{fixedPreProcessingPatch, fixedProcessingPatch}, "spec", "configPatches"))
+	clusterAddPatch := func(name, serviceName string) map[string]any {
+		socketAddress := map[string]any{
+			"address": serviceName + "." + gwNS + ".svc.cluster.local",
+			"port_value": int64(9004),
+		}
+		endpoint := map[string]any{"address": map[string]any{"socket_address": socketAddress}}
+		assignment := map[string]any{
+			"cluster_name": name,
+			"endpoints": []any{map[string]any{
+				"lb_endpoints": []any{map[string]any{"endpoint": endpoint}},
+			}},
+		}
+		return map[string]any{
+			"applyTo": "CLUSTER",
+			"match":   map[string]any{"context": "GATEWAY"},
+			"patch": map[string]any{
+				"operation": "ADD",
+				"value": map[string]any{
+					"name":            name,
+					"type":            "STRICT_DNS",
+					"load_assignment": assignment,
+				},
+			},
+		}
+	}
+	preClusterAdd := clusterAddPatch("payload-pre-processing-extproc", PayloadPreProcessingServiceName(tenantID))
+	processingClusterAdd := clusterAddPatch("payload-processing-extproc", PayloadProcessingServiceName(tenantID))
+	fixedClusterEF := fixedClusterNoAddEF.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(fixedClusterEF.Object,
+		[]any{fixedPreProcessingPatch, fixedProcessingPatch, preClusterAdd, processingClusterAdd}, "spec", "configPatches"))
+	missingPreClusterEF := fixedClusterNoAddEF.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(missingPreClusterEF.Object,
+		[]any{fixedPreProcessingPatch, fixedProcessingPatch, processingClusterAdd}, "spec", "configPatches"))
+	missingProcessingClusterEF := fixedClusterNoAddEF.DeepCopy()
+	require.NoError(t, unstructured.SetNestedSlice(missingProcessingClusterEF.Object,
+		[]any{fixedPreProcessingPatch, fixedProcessingPatch, preClusterAdd}, "spec", "configPatches"))
 	mirroredPreProcessing := preProcessing.DeepCopy()
 	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Image = "registry.example/custom:latest"
 	mirroredPreProcessing.Spec.Template.Spec.Containers[0].Args = nil
@@ -325,6 +364,12 @@ func TestPraxisPayloadProcessingReady(t *testing.T) {
 		{name: "missing pre-processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingPrePatch}, detail: "has no pre-processing HTTP_FILTER patch"},
 		{name: "missing processing patch", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, missingProcessingPatch}, detail: "has no processing HTTP_FILTER patch"},
 		{name: "wrong processing patch cluster", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, wrongPatch}, detail: "has no processing HTTP_FILTER patch"},
+		{name: "fixed clusters without ADD patches", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, fixedClusterNoAddEF}, detail: "matching CLUSTER ADD patch"},
+		{name: "fixed pre-processing cluster without ADD patch", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, missingPreClusterEF}, detail: "matching CLUSTER ADD patch"},
+		{name: "fixed processing cluster without ADD patch", seed: []client.Object{preProcessing, processing,
+			preProcessingService, processingService, missingProcessingClusterEF}, detail: "matching CLUSTER ADD patch"},
 		{name: "ready", seed: []client.Object{preProcessing, processing, preProcessingService, processingService, ef}, ready: true},
 		{name: "ready with fixed Praxis cluster names", seed: []client.Object{preProcessing, processing,
 			preProcessingService, processingService, fixedClusterEF}, ready: true},
