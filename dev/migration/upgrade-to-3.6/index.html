@@ -773,10 +773,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#token-rate-limit-counters-reset" class="md-nav__link">
+  <a href="#existing-subscriptions-keep-their-live-quotas" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Token rate-limit counters reset
+        Existing subscriptions keep their live quotas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trade-off-size-savings-only-accrue-on-new-subscriptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trade-off: size savings only accrue on new subscriptions
       
     </span>
   </a>
@@ -3279,10 +3290,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#token-rate-limit-counters-reset" class="md-nav__link">
+  <a href="#existing-subscriptions-keep-their-live-quotas" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Token rate-limit counters reset
+        Existing subscriptions keep their live quotas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trade-off-size-savings-only-accrue-on-new-subscriptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trade-off: size savings only accrue on new subscriptions
       
     </span>
   </a>
@@ -3345,19 +3367,58 @@
 <h1 id="upgrade-to-36">Upgrade to 3.6</h1>
 <h2 id="recommended-downtime">Recommended downtime</h2>
 <p>When upgrading from RHOAI <strong>3.5</strong> to <strong>3.6</strong>, schedule a <strong>short maintenance window</strong>.</p>
-<p>MaaS rewrites gateway <code>AuthPolicy</code> identity fields and per-model <code>TokenRateLimitPolicy</code> predicates so rate limiting matches a short subscription rate-limit ID from maas-api. Until maas-api, Authorino’s subscription-info cache, and the controller-managed policies are all on the new contract, rate-limit matching can briefly fail open. A small planned downtime (or a traffic pause through the gateway) avoids that window.</p>
-<h2 id="token-rate-limit-counters-reset">Token rate-limit counters reset</h2>
-<p>On upgrade, TRLP limit map keys change from per-subscription names
-(<code>{namespace}-{subscription}-{model}-tokens</code>) to rate-grouped names
-(<code>tokens-{limit}-per-{window}</code>), and Limitador counters switch from
-<code>selected_subscription_key</code> to the short <code>selected_subscription_id</code>.</p>
-<p>Limitador <strong>enforcement</strong> counters for those limits start fresh: in-window token usage against subscription quotas resets. Users may see a one-time “full budget again” effect after upgrade until the next window elapses.</p>
-<p>This does <strong>not</strong> rewrite or invalidate historical <strong>Prometheus</strong> or <strong>Loki</strong> usage data. Telemetry labels continue to use the human-readable subscription name (<code>auth.identity.selected_subscription</code> / <code>X-MaaS-Subscription</code>), not the rate-limit ID. Pre-upgrade series and logs remain queryable under the same subscription labels; only live Limitador quota state is affected.</p>
+<p>MaaS rewrites gateway <code>AuthPolicy</code> identity fields and per-model <code>TokenRateLimitPolicy</code> predicates so <strong>new</strong> subscriptions can rate-limit on a short ID from maas-api. Until maas-api, Authorino’s subscription-info cache, and the controller-managed policies are all on the new contract, rate-limit matching for those new subscriptions can briefly fail open. A small planned downtime (or a traffic pause through the gateway) avoids that window.</p>
+<p>Existing subscriptions keep matching on <code>selected_subscription_key</code> and do not depend on <code>rateLimitId</code> being present.</p>
+<h2 id="existing-subscriptions-keep-their-live-quotas">Existing subscriptions keep their live quotas</h2>
+<p>Subscriptions that already exist at upgrade time stay on the pre-1546 identity:</p>
+<ul>
+<li>TRLP <strong><code>when</code></strong> predicates and Limitador <strong>counters</strong> continue to use <code>auth.identity.selected_subscription_key</code>.</li>
+<li>maas-api does <strong>not</strong> return <code>rateLimitId</code> for those CRs.</li>
+<li>The controller stamps <code>status.rateLimitIdentity: legacy</code> so a later reconcile cannot silently switch them to short IDs. Status is ignored by GitOps diffing by default, so the stamp does not flap OutOfSync.</li>
+</ul>
+<p>Subscriptions <strong>created after</strong> the 3.6 controller is running are stamped <code>status.rateLimitIdentity: short</code>. Those use <code>selected_subscription_id</code> (16-hex SHA-256 of <code>namespace/name@modelNs/model</code>) for matching and counters, and may expose <code>X-MaaS-Subscription-Rate-Limit-Id</code> when select returns <code>rateLimitId</code>.</p>
+<p>Delete-and-recreate of an old subscription is treated as a <strong>new</strong> CR: it opts into short IDs and starts a <strong>fresh</strong> Limitador counter for that subscription. In-place spec edits do not migrate identity unless <code>spec.rateLimitIdentity</code> is set.</p>
+<p>Explicitly setting <code>spec.rateLimitIdentity</code> to <code>short</code> or <code>legacy</code> is allowed as an operator escape hatch, but <strong>also resets that subscription’s in-window Limitador counter</strong> because the TRLP predicate and counter expression change. Unknown values are rejected by the CRD / validating webhook. Clearing the spec field leaves the sticky <code>status.rateLimitIdentity</code> unchanged.</p>
+<h2 id="trade-off-size-savings-only-accrue-on-new-subscriptions">Trade-off: size savings only accrue on new subscriptions</h2>
+<p>Short IDs exist to keep long <code>namespace/name@modelNs/model</code> strings out of Kuadrant WASM / EnvoyFilter predicates (the ~1.5 MiB object-size problem). Grandfathering existing CRs buys quota continuity at the cost of that size win:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Existing subscriptions</th>
+<th>Subscriptions created after upgrade</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TRLP match / counters</td>
+<td><code>selected_subscription_key</code> (long string in each predicate clause)</td>
+<td><code>selected_subscription_id</code> (16 hex chars)</td>
+</tr>
+<tr>
+<td>Live Limitador quota</td>
+<td>Unchanged by the identity change</td>
+<td>Starts at zero (correct for a new CR)</td>
+</tr>
+<tr>
+<td>EnvoyFilter / WasmPlugin size</td>
+<td>Still pays the long-key clause cost</td>
+<td>Compact clauses</td>
+</tr>
+</tbody>
+</table>
+<p>Further costs while a cluster has both generations:</p>
+<ul>
+<li><strong>A mixed-rate group splits into two TRLP limits</strong> (<code>tokens-{limit}-per-{window}</code> for legacy members, <code>tokens-{limit}-per-{window}-id</code> for short-ID members). Kuadrant copies every limit into every route-match ActionSet, so mixed generations partially undo rate grouping (see <a href="../../advanced-administration/subscription-cardinality/#gateway-config-size">Subscription Cardinality</a>) until the legacy members are gone.</li>
+<li>There is <strong>no automatic backfill</strong>. To reclaim the size win for an old subscription you must recreate it (or set <code>spec.rateLimitIdentity: short</code>), which <strong>resets that subscription’s in-window quota</strong>.</li>
+<li>Historical <strong>Prometheus</strong> and <strong>Loki</strong> usage is unaffected either way. Telemetry still labels by subscription name (<code>auth.identity.selected_subscription</code> / <code>X-MaaS-Subscription</code>).</li>
+</ul>
+<p>If the cluster still uses per-subscription TRLP limit names from before rate grouping, those names still change to <code>tokens-{limit}-per-{window}</code> on upgrade. That rename is independent of short IDs and can still start fresh Limitador counters for the current window.</p>
 <h2 id="what-else-to-know">What else to know</h2>
 <ul>
-<li><code>auth.identity.selected_subscription_key</code> remains for telemetry and debugging.</li>
-<li>Rate limiting matches <code>auth.identity.selected_subscription_id</code> (see <a href="../../architecture-internals/authentication-internals/">Authentication Internals</a>).</li>
-<li>Response header <code>X-MaaS-Subscription-Rate-Limit-Id</code> may be injected when select returns <code>rateLimitId</code>. Gateway AuthPolicy rejects inbound client values for that header; also ensure Praxis / identity-header strip configs treat <code>x-maas-*</code> (prefix or explicit list) so it cannot be spoofed upstream.</li>
+<li><code>auth.identity.selected_subscription_key</code> remains for telemetry and debugging, and is still the rate-limit identity for legacy subscriptions.</li>
+<li>Rate limiting for <strong>new</strong> subscriptions matches <code>auth.identity.selected_subscription_id</code> (see <a href="../../architecture-internals/authentication-internals/">Authentication Internals</a>).</li>
+<li>Response header <code>X-MaaS-Subscription-Rate-Limit-Id</code> may be injected when select returns <code>rateLimitId</code> (new subscriptions only). Gateway AuthPolicy rejects inbound client values for that header; also ensure Praxis / identity-header strip configs treat <code>x-maas-*</code> (prefix or explicit list) so it cannot be spoofed upstream.</li>
 </ul>
 <h2 id="ipp-praxis-plugins-configmap-migration-gate">IPP → Praxis plugins ConfigMap migration gate</h2>
 <p>When a tenant flips to Praxis (<code>maas.opendatahub.io/payload-processing-type=praxis</code>),
@@ -3433,7 +3494,7 @@ still-needed customizations in the Praxis ConfigMap shape afterward.</p>
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 15, 2026 19:29:22 UTC">October 15, 2026</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date" title="October 21, 2026 11:39:46 UTC">October 21, 2026</span>
   </span>
 
     
