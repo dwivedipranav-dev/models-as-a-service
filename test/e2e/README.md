@@ -112,6 +112,15 @@ EXTERNAL_OIDC=true OIDC_ISSUER_URL=... OIDC_TOKEN_URL=... \
   pytest tests/ -m nightly -v
 ```
 
+To run only the OIDC tests (pass 3) and skip passes 1–2, set `E2E_RUN_ONLY_OIDC_TESTS=true`. The dedicated OIDC CI job uses this because PR `/group-test` already covers passes 1–2. It requires `EXTERNAL_OIDC=true` and cannot be combined with `--serial-only`:
+
+```bash
+E2E_RUN_ONLY_OIDC_TESTS=true EXTERNAL_OIDC=true \
+  ./test/e2e/scripts/run_e2e_tests.sh
+```
+
+Delegated Grid administration needs the strict OIDC contract on the default AITenant. When `EXTERNAL_OIDC=true`, `scripts/deploy.sh` also sets `audience`, `accessTokenPurposeClaim`, and `accessTokenPurpose` from `OIDC_AUDIENCE`, `OIDC_ACCESS_TOKEN_PURPOSE_CLAIM`, and `OIDC_ACCESS_TOKEN_PURPOSE` when they are provided. The test realm's tokens must carry matching `aud` and purpose claims.
+
 ## Parallel execution (pytest-xdist)
 
 By default, `run_e2e_tests.sh` runs tests in **two marker-filtered passes** (default: 7 xdist workers on pass 1). `--serial-only` runs pass 2 (`-m "serial and not legacy_ipp"`) only and skips non-serial tests:

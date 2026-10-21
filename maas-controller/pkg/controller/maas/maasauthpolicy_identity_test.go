@@ -1,6 +1,7 @@
 package maas
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -112,29 +113,92 @@ func TestVerifiedIdentityHeaderStrictContract(t *testing.T) {
 	if !ok {
 		t.Fatalf("claims are missing: %#v", properties)
 	}
-	expectedClaims := map[string]string{
-		"iss":                          "auth.identity.iss",
-		"sub":                          "auth.identity.sub",
-		"aud":                          "auth.identity.aud",
-		"azp":                          "auth.identity.azp",
-		"name":                         `has(auth.identity.name) ? auth.identity.name : ""`,
-		"given_name":                   `has(auth.identity.given_name) ? auth.identity.given_name : ""`,
-		"family_name":                  `has(auth.identity.family_name) ? auth.identity.family_name : ""`,
-		"preferred_username":           `has(auth.identity.preferred_username) ? auth.identity.preferred_username : ""`,
-		"email":                        `has(auth.identity.email) ? auth.identity.email : ""`,
-		"groups":                       `has(auth.identity.groups) ? auth.identity.groups : []`,
-		"https://redhat.com/maas/orgs": `"https://redhat.com/maas/orgs" in auth.identity ? auth.identity["https://redhat.com/maas/orgs"] : []`,
+	// The claims object must be a single CEL expression. A nested map of
+	// per-claim expressions is not a valid AuthPolicy JSON property and the API
+	// server prunes it to an empty object.
+	if len(claims) != 1 {
+		t.Fatalf("claims must only carry an expression: %#v", claims)
 	}
-	if len(claims) != len(expectedClaims) {
-		t.Fatalf("claims count = %d, want %d: %#v", len(claims), len(expectedClaims), claims)
+	expression, ok := claims["expression"].(string)
+	if !ok {
+		t.Fatalf("claims expression is not a string: %#v", claims)
 	}
-	for claim, expectedExpression := range expectedClaims {
-		claimConfig, ok := claims[claim].(map[string]any)
-		if !ok {
-			t.Fatalf("claim %q is not an object: %#v", claim, claims[claim])
+	expectedExpression := `{"iss": auth.identity.iss, ` +
+		`"sub": auth.identity.sub, ` +
+		`"aud": auth.identity.aud, ` +
+		`"azp": auth.identity.azp, ` +
+		`"name": has(auth.identity.name) ? auth.identity.name : "", ` +
+		`"given_name": has(auth.identity.given_name) ? auth.identity.given_name : "", ` +
+		`"family_name": has(auth.identity.family_name) ? auth.identity.family_name : "", ` +
+		`"preferred_username": has(auth.identity.preferred_username) ? auth.identity.preferred_username : "", ` +
+		`"email": has(auth.identity.email) ? auth.identity.email : "", ` +
+		`"groups": has(auth.identity.groups) ? auth.identity.groups : [], ` +
+		`"https://redhat.com/maas/orgs": "https://redhat.com/maas/orgs" in auth.identity ? auth.identity["https://redhat.com/maas/orgs"] : []}`
+	if expression != expectedExpression {
+		t.Errorf("claims expression = %q, want %q", expression, expectedExpression)
+	}
+}
+
+// TestGatewayAuthPolicyJSONPropertiesMatchAuthPolicySchema guards against
+// response JSON properties that the AuthPolicy CRD would silently prune. Each
+// property value may only carry value, selector, or expression.
+func TestGatewayAuthPolicyJSONPropertiesMatchAuthPolicySchema(t *testing.T) {
+	oidc := &oidcConfig{
+		IssuerURL:               "https://issuer.example.com",
+		ClientID:                "maas-client",
+		Audience:                "maas-api",
+		AccessTokenPurposeClaim: "token_use",
+		AccessTokenPurpose:      "access",
+	}
+	for _, test := range []struct {
+		name string
+		oidc *oidcConfig
+	}{
+		{name: "without oidc", oidc: nil},
+		{name: "strict oidc", oidc: oidc},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec := gatewayAuthPolicySpecTestObject(t, test.oidc)
+			found := assertJSONPropertiesMatchAuthPolicySchema(t, spec.Object, "")
+			if found == 0 {
+				t.Fatal("no JSON response properties found in gateway AuthPolicy spec")
+			}
+		})
+	}
+}
+
+// assertJSONPropertiesMatchAuthPolicySchema walks a generated AuthPolicy and
+// returns the number of JSON response properties it checked.
+func assertJSONPropertiesMatchAuthPolicySchema(t *testing.T, node any, path string) int {
+	t.Helper()
+	checked := 0
+	switch value := node.(type) {
+	case map[string]any:
+		if jsonResponse, ok := value["json"].(map[string]any); ok {
+			if properties, ok := jsonResponse["properties"].(map[string]any); ok {
+				for name, property := range properties {
+					propertyPath := path + ".json.properties." + name
+					config, ok := property.(map[string]any)
+					if !ok {
+						t.Errorf("%s is not an object: %#v", propertyPath, property)
+						continue
+					}
+					for key := range config {
+						if key != "value" && key != "selector" && key != "expression" {
+							t.Errorf("%s has field %q; AuthPolicy JSON properties only allow value, selector, or expression", propertyPath, key)
+						}
+					}
+					checked++
+				}
+			}
 		}
-		if claimConfig["expression"] != expectedExpression {
-			t.Errorf("claim %q expression = %#v, want %q", claim, claimConfig["expression"], expectedExpression)
+		for key, child := range value {
+			checked += assertJSONPropertiesMatchAuthPolicySchema(t, child, path+"."+key)
+		}
+	case []any:
+		for i, child := range value {
+			checked += assertJSONPropertiesMatchAuthPolicySchema(t, child, path+"["+strconv.Itoa(i)+"]")
 		}
 	}
+	return checked
 }
