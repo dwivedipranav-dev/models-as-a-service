@@ -83,7 +83,7 @@ func serve() error {
 
 	metricsRegistry := prometheus.NewRegistry()
 
-	cluster, err := config.NewClusterConfig(cfg.Namespace, cfg.MaaSSubscriptionNamespace, constant.DefaultResyncPeriod, cfg.SARCacheMaxSize, metricsRegistry, log)
+	cluster, err := config.NewClusterConfig(cfg.AITenantNamespace, cfg.MaaSSubscriptionNamespace, constant.DefaultResyncPeriod, cfg.SARCacheMaxSize, metricsRegistry, log)
 	if err != nil {
 		return fmt.Errorf("failed to create cluster config: %w", err)
 	}
@@ -260,7 +260,14 @@ func registerHandlers(
 	authPolicyChecker := authpolicy.NewChecker(log, cluster.MaaSAuthPolicyLister)
 	subscriptionSelector := subscription.NewSelector(log, cluster.MaaSSubscriptionLister, cluster.MaaSModelRefLister, authPolicyChecker,
 		subscription.WithTenantName(cfg.TenantName),
-		subscription.WithSubscriptionNamespace(cfg.MaaSSubscriptionNamespace))
+		subscription.WithSubscriptionNamespace(cfg.MaaSSubscriptionNamespace),
+		subscription.WithGuardrailPlanResolver(subscription.NewGuardrailPlanResolver(
+			cfg.AITenantNamespace,
+			cfg.AITenantName,
+			cluster.AITenantGetter,
+			cluster.MaasTenantConfigGetter,
+			cluster.AIGuardrailGetter,
+		)))
 
 	resolveCtx, resolveCancel := context.WithTimeout(ctx, time.Duration(cfg.AccessCheckTimeoutSeconds)*time.Second)
 	gatewayInternalHost, err := config.ResolveGatewayInternalHost(resolveCtx, cluster.ClientSet, cfg.GatewayName, cfg.GatewayNamespace)

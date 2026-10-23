@@ -671,7 +671,7 @@ func patchMaaSAPIDeploymentNSNetworkPolicy(r *unstructured.Unstructured, params 
 	ingress = []any{map[string]any{
 		"from": []any{
 			maasAPIDeploymentNamespacePeer(params.ControllerNamespace, "control-plane", "maas-controller"),
-			maasAPIDeploymentNamespacePeer(params.ControllerNamespace, "deployment", "odh-dashboard"),
+			maasAPIDeploymentNamespacePeerIn(params.ControllerNamespace, "deployment", maasAPIDashboardDeploymentLabelValues),
 			maasAPIDeploymentNamespacePeer(params.ControllerNamespace, "maas-api-e2e-probe", "true"),
 		},
 		"ports": []any{map[string]any{
@@ -692,6 +692,29 @@ func maasAPIDeploymentNamespacePeer(controllerNamespace, labelKey, labelValue st
 		"podSelector": map[string]any{
 			"matchLabels": map[string]any{
 				labelKey: labelValue,
+			},
+		},
+	}
+}
+
+func maasAPIDeploymentNamespacePeerIn(controllerNamespace, labelKey string, labelValues []string) map[string]any {
+	values := make([]any, len(labelValues))
+	for i, v := range labelValues {
+		values[i] = v
+	}
+	return map[string]any{
+		"namespaceSelector": map[string]any{
+			"matchLabels": map[string]any{
+				"kubernetes.io/metadata.name": controllerNamespace,
+			},
+		},
+		"podSelector": map[string]any{
+			"matchExpressions": []any{
+				map[string]any{
+					"key":      labelKey,
+					"operator": "In",
+					"values":   values,
+				},
 			},
 		},
 	}

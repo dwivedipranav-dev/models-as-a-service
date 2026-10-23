@@ -14,7 +14,7 @@ Today’s pipeline does **not** drive TokenRateLimitPolicy by splitting group me
    
    with the caller’s groups, username, requested subscription header (when applicable), and model scope.
 
-2. **maas-api** resolves which **MaaSSubscription** applies (including validation, auto-selection when only one subscription applies, and error paths). Results are exposed to Authorino as **`subscription-info`** metadata.
+2. **maas-api** resolves which **MaaSSubscription** applies (including validation, auto-selection when only one subscription applies, and error paths). Results are exposed to Authorino as **`subscription-info`** metadata. When a guardrail resolver is configured, a successful model selection also includes **`selectedGuardrailChecks`**, a sparse map whose keys are the shared SHA-256 check IDs and whose values are `true`. The map is `{}` when no guardrails apply; if a selected attachment cannot be resolved, the endpoint returns `guardrail_unavailable` and does not return a partial selection. The field carries selection state only; request headers are handled separately.
 
 3. **AuthPolicy `filters.identity`** copies resolved fields onto **`auth.identity`**, including:
    - **`selected_subscription_key`** — model-scoped key of the form  

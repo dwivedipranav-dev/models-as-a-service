@@ -46,18 +46,56 @@ If the cluster still uses per-subscription TRLP limit names from before rate gro
 - Rate limiting for **new** subscriptions matches `auth.identity.selected_subscription_id` (see [Authentication Internals](../architecture-internals/authentication-internals.md)).
 - Response header `X-MaaS-Subscription-Rate-Limit-Id` may be injected when select returns `rateLimitId` (new subscriptions only). Gateway AuthPolicy rejects inbound client values for that header; also ensure Praxis / identity-header strip configs treat `x-maas-*` (prefix or explicit list) so it cannot be spoofed upstream.
 
-## IPP → Praxis plugins ConfigMap migration gate
+## IPP → Praxis API translation migration
 
 When a tenant flips to Praxis (`maas.opendatahub.io/payload-processing-type=praxis`),
 maas-controller inspects the live `payload-processing-plugins` ConfigMap
 **before** deleting legacy IPP resources ([RHOAIENG-98846](https://issues.redhat.com/browse/RHOAIENG-98846)):
 
-| Live ConfigMap | Behavior |
+| RHOAI 3.5 ConfigMap | Behavior |
 | --- | --- |
-| Product default (request `api-translation`, empty response chain) | Auto-migrate |
-| Default + response `api-translation` enabled | Auto-migrate |
-| Default + customer metering plugin | Not fingerprinted yet — treated as non-standard until a 3.5 example is collected |
-| Any other customization | Migration **blocked** |
+| Exact product default | IPP already translated requests. `spec.apiTranslation.enabled` stays omitted/off for a new Praxis tenant. Cleanup proceeds only when active ExternalModels use OpenAI Chat Completions passthrough. |
+| Exact default plus response `api-translation` | IPP translated requests and responses. Before cleanup, maas-controller durably writes `spec.apiTranslation.enabled: true`, unless an operator already set the field. The compatibility check still applies. |
+| Unknown or customized ConfigMap | Migration **blocked**; the controller does not infer equivalent Praxis behavior. |
+
+The legacy IPP request translator was a multi-provider catch-all documented for
+OpenAI, Anthropic, Azure OpenAI, Vertex AI, and Bedrock Mantle. Praxis currently
+qualifies only OpenAI `openai-chat` pass-through and Anthropic `messages`
+translation for ExternalModels. The `apiTranslation` permission is not a
+tenant-wide translator choice: it permits both the shared **Anthropic Messages
+client → OpenAI-compatible backend** flow and the ExternalModel **OpenAI Chat
+Completions client → selected Anthropic Messages provider** flow. In the
+ExternalModel path, `intelligent_route` selects the provider per request, and
+the selected provider's profile remains bound through request and response
+translation. OpenAI-compatible candidates remain pass-through.
+
+An active Azure OpenAI, Vertex AI, Bedrock, custom provider, or unqualified
+format/auth binding is not claimed as compatible. The AIGC resolver fails that
+reconcile before publishing or cleaning serving resources, preserving the
+last-known route and overlay; the migration compatibility check likewise must
+keep IPP state until that binding is qualified or an operator explicitly
+accepts the compatibility risk. A passing shared `/v1/messages` request does
+not prove ExternalModel compatibility, and a recognized IPP ConfigMap
+fingerprint alone does not prove every historical provider direction.
+
+The pure-default IPP ConfigMap already enabled request-side `api-translation`;
+its response chain was empty. Baseline #2 added response-side processing.
+Recognizing either fingerprint preserves that migration intent, but does not
+prove support for every provider or response mode. The recognized fingerprints
+and migration decisions are intentionally strict.
+
+For a recognized ConfigMap baseline, an explicit
+`spec.apiTranslation.enabled: false` accepts the compatibility loss for an
+unsupported active ExternalModel and lets cleanup proceed. It does not bypass
+the fingerprint check for a customized ConfigMap. The force annotation below
+can bypass that separate check. Both choices accept compatibility risk; they
+are overrides, not parity. Review and test affected model/provider bindings
+before using them. MaaS records an accepted risk on `MaasTenantConfig` and keeps
+it in the `Degraded` condition after the one-shot cleanup while affected
+provider bindings remain active. The warning clears when no active
+ExternalModel needs the unsupported legacy transform. Forced cleanup of a
+customized ConfigMap retains a warning that the migration does not establish
+IPP parity.
 
 While blocked:
 
@@ -75,9 +113,12 @@ kubectl annotate maastenantconfig default-tenant -n <tenant-namespace> \
   maas.opendatahub.io/force-payload-processing-migration=true --overwrite
 ```
 
-Known-good ConfigMaps do **not** need the force annotation. Applying force on a
-customized ConfigMap replaces it with the Praxis plugins schema; re-apply any
-still-needed customizations in the Praxis ConfigMap shape afterward.
+Known-good ConfigMaps do **not** need the force annotation when their active
+ExternalModels are compatible. Applying force on a customized ConfigMap
+replaces it with the Praxis plugins schema; re-apply any still-needed
+customizations in the Praxis ConfigMap shape afterward. An override does not
+establish parity for Azure, Vertex, Bedrock, OpenAI variants, streaming, or
+other provider behavior without matching deployed evidence.
 ## Legacy metrics usage dashboard is opt-in
 
 `Config.spec.usageMetricsDashboard` defaults to `false`. After upgrade, the operator removes any controller-owned copy of the Prometheus-based Perses dashboard (`dashboard-3-maas-usage-admin`). To keep it:
