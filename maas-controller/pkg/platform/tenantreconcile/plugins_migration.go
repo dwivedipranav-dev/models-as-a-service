@@ -18,6 +18,7 @@ package tenantreconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -25,8 +26,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
+
+	maasv1alpha1 "github.com/opendatahub-io/models-as-a-service/maas-controller/api/maas/v1alpha1"
 )
 
 const (
@@ -51,6 +57,7 @@ type pluginsMigrationResult struct {
 	Decision pluginsMigrationDecision
 	Baseline string // "default", "default+response-api-translation", "praxis", "absent", or ""
 	Reason   string
+	Forced   bool // an explicit force annotation accepts compatibility loss
 }
 
 type ippPluginRef struct {
@@ -89,27 +96,30 @@ type ippProcessorConfig struct {
 //
 // Baseline #3 (legacy metering) is intentionally omitted until a real customer
 // example ConfigMap is collected.
-func evaluatePluginsConfigMapMigration(ctx context.Context, c client.Client, params PlatformParams, tenant client.Object) (pluginsMigrationResult, error) {
-	if forcePayloadProcessingMigration(tenant) {
-		return pluginsMigrationResult{
-			Decision: pluginsMigrationAllow,
-			Baseline: "force",
-			Reason:   "force-payload-processing-migration annotation allows migration of non-standard ConfigMap",
-		}, nil
+func evaluatePluginsConfigMapMigration(ctx context.Context, reader client.Reader, params PlatformParams, tenant client.Object) (pluginsMigrationResult, error) {
+	if mtc, ok := tenant.(*maasv1alpha1.MaasTenantConfig); ok {
+		latest := &maasv1alpha1.MaasTenantConfig{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(mtc), latest); err != nil {
+			return pluginsMigrationResult{}, fmt.Errorf("get MaasTenantConfig %s for migration override: %w", client.ObjectKeyFromObject(mtc), err)
+		}
+		tenant = latest
 	}
+	forced := forcePayloadProcessingMigration(tenant)
 
 	cm := &corev1.ConfigMap{}
 	key := client.ObjectKey{
 		Namespace: params.GatewayNamespace,
 		Name:      PayloadProcessingPluginsConfigMapForTenant(params.TenantIdentifier),
 	}
-	if err := c.Get(ctx, key, cm); err != nil {
+	if err := reader.Get(ctx, key, cm); err != nil {
 		if apierrors.IsNotFound(err) {
-			return pluginsMigrationResult{
+			result := pluginsMigrationResult{
 				Decision: pluginsMigrationAllow,
 				Baseline: "absent",
 				Reason:   "plugins ConfigMap not present; nothing custom to preserve",
-			}, nil
+				Forced:   forced,
+			}
+			return result, nil
 		}
 		return pluginsMigrationResult{}, fmt.Errorf("get plugins ConfigMap %s/%s: %w", key.Namespace, key.Name, err)
 	}
@@ -119,10 +129,19 @@ func evaluatePluginsConfigMapMigration(ctx context.Context, c client.Client, par
 			Decision: pluginsMigrationAllow,
 			Baseline: "praxis",
 			Reason:   "plugins ConfigMap already uses Praxis schema",
+			Forced:   forced,
 		}, nil
 	}
 
 	if !isIPPPluginsConfigMap(cm) {
+		if forced {
+			return pluginsMigrationResult{
+				Decision: pluginsMigrationAllow,
+				Baseline: "force",
+				Reason:   forcedMigrationReason("force-payload-processing-migration annotation allows migration of an unrecognized ConfigMap", true),
+				Forced:   true,
+			}, nil
+		}
 		return pluginsMigrationResult{
 			Decision: pluginsMigrationBlock,
 			Reason: fmt.Sprintf(
@@ -137,7 +156,16 @@ func evaluatePluginsConfigMapMigration(ctx context.Context, c client.Client, par
 		return pluginsMigrationResult{
 			Decision: pluginsMigrationAllow,
 			Baseline: baseline,
-			Reason:   "plugins ConfigMap matches known-good baseline " + baseline,
+			Reason:   forcedMigrationReason("plugins ConfigMap matches known-good baseline "+baseline, forced),
+			Forced:   forced,
+		}, nil
+	}
+	if forced {
+		return pluginsMigrationResult{
+			Decision: pluginsMigrationAllow,
+			Baseline: "force",
+			Reason:   forcedMigrationReason("force-payload-processing-migration annotation allows migration of non-standard ConfigMap", true),
+			Forced:   true,
 		}, nil
 	}
 
@@ -148,6 +176,258 @@ func evaluatePluginsConfigMapMigration(ctx context.Context, c client.Client, par
 			cm.Namespace, cm.Name, detail, AnnotationForcePayloadProcessingMigration,
 		),
 	}, nil
+}
+
+func forcedMigrationReason(reason string, forced bool) string {
+	if !forced {
+		return reason
+	}
+	return reason + "; forced migration accepts compatibility loss and does not establish IPP parity"
+}
+
+type apiTranslationMigrationIntent struct {
+	Explicit bool
+	Enabled  bool
+}
+
+func apiTranslationCompatibilityRisk(models []string) string {
+	return fmt.Sprintf(
+		"active ExternalModel provider bindings %s require legacy IPP request translation; the installed Praxis ExtProc cannot preserve OpenAI Chat Completions → provider-format dispatch yet",
+		strings.Join(models, ", "),
+	)
+}
+
+// persistAPITranslationMigrationRisk makes an accepted compatibility loss
+// durable before cleanup removes the IPP ConfigMap. The marker is consumed on
+// later reconciles to keep the tenant's Degraded condition informative while
+// affected provider bindings remain active.
+func persistAPITranslationMigrationRisk(ctx context.Context, c client.Client, tenant client.Object, risk string) error {
+	if risk != APITranslationMigrationRiskExplicitFalse && risk != APITranslationMigrationRiskForced {
+		return fmt.Errorf("unsupported API translation migration risk %q", risk)
+	}
+	return patchTenantAnnotations(ctx, c, tenant, func(annotations map[string]string) {
+		annotations[AnnotationAPITranslationMigrationRisk] = risk
+	})
+}
+
+func appendAcceptedAPITranslationMigrationRiskWarning(
+	ctx context.Context,
+	reader client.Reader,
+	tenant client.Object,
+	params *PlatformParams,
+) error {
+	annotations := tenant.GetAnnotations()
+	risk := ""
+	if annotations != nil {
+		risk = annotations[AnnotationAPITranslationMigrationRisk]
+	}
+	if risk == "" {
+		return nil
+	}
+
+	if risk == APITranslationMigrationRiskExplicitFalse {
+		models, err := legacyIPPTranslationModels(ctx, reader, *params, tenant)
+		if err != nil {
+			return fmt.Errorf("recheck accepted API translation compatibility risk: %w", err)
+		}
+		if len(models) == 0 {
+			return nil
+		}
+		params.Warnings = append(params.Warnings, apiTranslationCompatibilityRisk(models)+"; explicit spec.apiTranslation.enabled=false accepts this compatibility loss")
+		return nil
+	}
+
+	warning := forcedMigrationReason("force-payload-processing-migration annotation allowed migration", true)
+	models, err := legacyIPPTranslationModels(ctx, reader, *params, tenant)
+	if err != nil {
+		return fmt.Errorf("recheck forced API translation compatibility risk: %w", err)
+	}
+	if len(models) > 0 {
+		warning = apiTranslationCompatibilityRisk(models) + "; " + forcedMigrationReason("force-payload-processing-migration annotation allowed migration", true)
+	}
+	params.Warnings = append(params.Warnings, warning)
+	return nil
+}
+
+// persistAPITranslationMigrationIntent records the recognized response-enabled
+// IPP baseline before cleanup can delete its ConfigMap. Update uses the live
+// resourceVersion and retries conflicts so an operator's explicit true/false
+// choice wins over automatic migration.
+func persistAPITranslationMigrationIntent(ctx context.Context, c client.Client, reader client.Reader, tenant client.Object, persistDefault bool) (apiTranslationMigrationIntent, error) {
+	mtc, ok := tenant.(*maasv1alpha1.MaasTenantConfig)
+	if !ok {
+		if persistDefault {
+			return apiTranslationMigrationIntent{}, fmt.Errorf("cannot persist IPP api-translation intent on %T; the authoritative MaasTenantConfig is required", tenant)
+		}
+		return apiTranslationMigrationIntent{}, nil
+	}
+
+	key := client.ObjectKeyFromObject(mtc)
+	intent := apiTranslationMigrationIntent{}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &maasv1alpha1.MaasTenantConfig{}
+		if err := reader.Get(ctx, key, latest); err != nil {
+			return fmt.Errorf("get MaasTenantConfig %s for api-translation migration intent: %w", key, err)
+		}
+		if latest.Spec.APITranslation != nil && latest.Spec.APITranslation.Enabled != nil {
+			intent = apiTranslationMigrationIntent{Explicit: true, Enabled: *latest.Spec.APITranslation.Enabled}
+			return nil
+		}
+		if !persistDefault {
+			intent = apiTranslationMigrationIntent{}
+			return nil
+		}
+
+		if latest.Spec.APITranslation == nil {
+			latest.Spec.APITranslation = &maasv1alpha1.TenantAPITranslationConfig{}
+		}
+		enabled := true
+		latest.Spec.APITranslation.Enabled = &enabled
+		if err := c.Update(ctx, latest); err != nil {
+			return err
+		}
+		intent = apiTranslationMigrationIntent{Enabled: true}
+		return nil
+	})
+	if err != nil {
+		return apiTranslationMigrationIntent{}, fmt.Errorf("persist api-translation migration intent on MaasTenantConfig %s: %w", key, err)
+	}
+	return intent, nil
+}
+
+// legacyIPPTranslationModels returns active ExternalModels whose provider
+// binding is not the known-safe OpenAI-provider/OpenAI-Chat passthrough. The
+// wire format alone is insufficient: Azure, Vertex, and Bedrock providers can
+// use OpenAI-shaped requests while still needing provider-specific legacy
+// path or response handling. Current Praxis ExtProc does not dispatch those
+// legacy transforms after provider selection.
+func legacyIPPTranslationModels(ctx context.Context, reader client.Reader, params PlatformParams, tenant client.Object) ([]string, error) {
+	namespace := params.ModelNamespace
+	if namespace == "" {
+		namespace = tenant.GetNamespace()
+	}
+	if namespace == "" {
+		return nil, errors.New("model namespace is required to assess legacy IPP translation compatibility")
+	}
+
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{Group: "inference.opendatahub.io", Version: "v1alpha1", Kind: "ExternalModelList"})
+	if err := reader.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list ExternalModels in %s for legacy IPP translation compatibility: %w", namespace, err)
+	}
+
+	var affected []string
+	for i := range list.Items {
+		model := &list.Items[i]
+		if !model.GetDeletionTimestamp().IsZero() || !externalModelTargetsGateway(model, params) {
+			continue
+		}
+		refs, found, err := unstructured.NestedSlice(model.Object, "spec", "externalProviderRefs")
+		if err != nil {
+			return nil, fmt.Errorf("read ExternalModel %s/%s provider refs: %w", namespace, model.GetName(), err)
+		}
+		if !found {
+			return nil, fmt.Errorf("ExternalModel %s/%s has no provider refs; cannot prove legacy IPP translation is unused", namespace, model.GetName())
+		}
+		for index, raw := range refs {
+			ref, ok := raw.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("ExternalModel %s/%s provider ref %d is malformed", namespace, model.GetName(), index)
+			}
+			weight, err := externalProviderRefWeight(ref)
+			if err != nil {
+				return nil, fmt.Errorf("ExternalModel %s/%s provider ref %d: %w", namespace, model.GetName(), index, err)
+			}
+			if weight <= 0 {
+				continue
+			}
+			apiFormat, found, err := unstructured.NestedString(ref, "apiFormat")
+			if err != nil {
+				return nil, fmt.Errorf("read ExternalModel %s/%s provider ref %d apiFormat: %w", namespace, model.GetName(), index, err)
+			}
+			if !found || strings.TrimSpace(apiFormat) == "" {
+				return nil, fmt.Errorf("ExternalModel %s/%s provider ref %d has no apiFormat; cannot prove it is safe to migrate", namespace, model.GetName(), index)
+			}
+			providerName, found, err := unstructured.NestedString(ref, "ref", "name")
+			if err != nil || !found || strings.TrimSpace(providerName) == "" {
+				affected = append(affected, fmt.Sprintf("%s (apiFormat=%s, provider unresolved)", model.GetName(), apiFormat))
+				continue
+			}
+			providerNamespace, found, err := unstructured.NestedString(ref, "ref", "namespace")
+			if err != nil {
+				return nil, fmt.Errorf("read ExternalModel %s/%s provider ref %d namespace: %w", namespace, model.GetName(), index, err)
+			}
+			if !found || strings.TrimSpace(providerNamespace) == "" {
+				providerNamespace = namespace
+			}
+			if providerNamespace != namespace {
+				affected = append(affected, fmt.Sprintf("%s (apiFormat=%s, cross-namespace provider %s/%s)", model.GetName(), apiFormat, providerNamespace, providerName))
+				continue
+			}
+
+			provider := &unstructured.Unstructured{}
+			provider.SetGroupVersionKind(schema.GroupVersionKind{Group: "inference.opendatahub.io", Version: "v1alpha1", Kind: "ExternalProvider"})
+			if err := reader.Get(ctx, client.ObjectKey{Namespace: providerNamespace, Name: providerName}, provider); err != nil {
+				if apierrors.IsNotFound(err) {
+					affected = append(affected, fmt.Sprintf("%s (apiFormat=%s, provider %s unresolved)", model.GetName(), apiFormat, providerName))
+					continue
+				}
+				return nil, fmt.Errorf("read ExternalProvider %s/%s for ExternalModel %s/%s: %w", providerNamespace, providerName, namespace, model.GetName(), err)
+			}
+			providerType, found, err := unstructured.NestedString(provider.Object, "spec", "provider")
+			if err != nil || !found || strings.TrimSpace(providerType) == "" {
+				affected = append(affected, fmt.Sprintf("%s (apiFormat=%s, provider %s has unknown type)", model.GetName(), apiFormat, providerName))
+				continue
+			}
+			if apiFormat != "openai-chat" || providerType != "openai" {
+				affected = append(affected, fmt.Sprintf("%s (apiFormat=%s, provider=%s)", model.GetName(), apiFormat, providerType))
+			}
+		}
+	}
+	sort.Strings(affected)
+	return affected, nil
+}
+
+func externalProviderRefWeight(ref map[string]any) (int64, error) {
+	value, found := ref["weight"]
+	if !found || value == nil {
+		return 1, nil
+	}
+	switch weight := value.(type) {
+	case int:
+		return int64(weight), nil
+	case int32:
+		return int64(weight), nil
+	case int64:
+		return weight, nil
+	case float64:
+		if weight == float64(int64(weight)) {
+			return int64(weight), nil
+		}
+	}
+	return 0, fmt.Errorf("weight has unsupported type %T", value)
+}
+
+func externalModelTargetsGateway(model *unstructured.Unstructured, params PlatformParams) bool {
+	if params.GatewayName == "" || params.GatewayNamespace == "" {
+		return true
+	}
+	refs, found, err := unstructured.NestedSlice(model.Object, "spec", "gatewayRefs")
+	if err != nil || !found || len(refs) == 0 {
+		return true
+	}
+	for _, raw := range refs {
+		ref, ok := raw.(map[string]any)
+		if !ok {
+			return true // malformed placement must fail closed for compatibility
+		}
+		name, _ := ref["name"].(string)
+		namespace, _ := ref["namespace"].(string)
+		if name == params.GatewayName && namespace == params.GatewayNamespace {
+			return true
+		}
+	}
+	return false
 }
 
 func forcePayloadProcessingMigration(tenant client.Object) bool {

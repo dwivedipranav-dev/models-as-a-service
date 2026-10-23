@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -42,6 +43,7 @@ type Selector struct {
 	modelLister           models.MaaSModelRefLister
 	accessChecker         ModelAccessChecker
 	subjectInventory      authpolicy.SubjectInventoryProvider
+	guardrailResolver     GuardrailPlanResolver
 	logger                *logger.Logger
 	tenantName            string
 	subscriptionNamespace string
@@ -60,6 +62,12 @@ func WithTenantName(name string) SelectorOption {
 // an additional guard for callers that provide a broader test lister.
 func WithSubscriptionNamespace(namespace string) SelectorOption {
 	return func(s *Selector) { s.subscriptionNamespace = namespace }
+}
+
+// WithGuardrailPlanResolver enables effective guardrail selection for
+// successful model selections.
+func WithGuardrailPlanResolver(resolver GuardrailPlanResolver) SelectorOption {
+	return func(s *Selector) { s.guardrailResolver = resolver }
 }
 
 // NewSelector creates a new subscription selector.
@@ -142,6 +150,7 @@ func (s *Selector) resolveModelAlias(requestedModel string) string {
 
 // subscription represents a parsed MaaSSubscription for selection.
 type subscription struct {
+	Object                   *unstructured.Unstructured
 	Name                     string
 	Namespace                string
 	DisplayName              string
@@ -553,6 +562,7 @@ func filterAuthorizedModels(refs []ModelRefInfo, authorizedSet map[authpolicy.Mo
 // selectExplicit handles the explicit subscription selection branch of Select.
 // It supports both "namespace/name" and bare "name" formats.
 func (s *Selector) selectExplicit(
+	ctx context.Context,
 	subscriptions []subscription,
 	requestedSubscription, requestedModel, username string,
 	groups []string,
@@ -570,7 +580,7 @@ func (s *Selector) selectExplicit(
 			if requestedModel != "" && authorizedSet == nil && !subscriptionIncludesModel(&sub, requestedModel) {
 				return nil, &ModelNotInSubscriptionError{Subscription: requestedSubscription, Model: requestedModel}
 			}
-			return s.buildAuthorizedResponse(&sub, requestedModel, authorizedSet)
+			return s.completeSelection(ctx, &sub, requestedModel, authorizedSet)
 		}
 	}
 
@@ -588,7 +598,7 @@ func (s *Selector) selectExplicit(
 			if requestedModel != "" && authorizedSet == nil && !subscriptionIncludesModel(&sub, requestedModel) {
 				return nil, &ModelNotInSubscriptionError{Subscription: requestedSubscription, Model: requestedModel}
 			}
-			return s.buildAuthorizedResponse(&sub, requestedModel, authorizedSet)
+			return s.completeSelection(ctx, &sub, requestedModel, authorizedSet)
 		}
 	}
 
@@ -599,6 +609,11 @@ func (s *Selector) selectExplicit(
 // Returns the selected subscription or an error if none found.
 // If requestedModel is provided, validates that the selected subscription includes that model.
 func (s *Selector) Select(groups []string, username string, requestedSubscription string, requestedModel string) (*SelectResponse, error) {
+	return s.SelectWithContext(context.Background(), groups, username, requestedSubscription, requestedModel)
+}
+
+// SelectWithContext selects a subscription and passes ctx to guardrail resolution.
+func (s *Selector) SelectWithContext(ctx context.Context, groups []string, username string, requestedSubscription string, requestedModel string) (*SelectResponse, error) {
 	if len(groups) == 0 && username == "" {
 		return nil, errors.New("either groups or username must be provided")
 	}
@@ -622,7 +637,7 @@ func (s *Selector) Select(groups []string, username string, requestedSubscriptio
 	}
 
 	if requestedSubscription != "" {
-		return s.selectExplicit(subscriptions, requestedSubscription, requestedModel, username, groups, authorizedSet)
+		return s.selectExplicit(ctx, subscriptions, requestedSubscription, requestedModel, username, groups, authorizedSet)
 	}
 
 	// Auto-selection
@@ -659,7 +674,7 @@ func (s *Selector) Select(groups []string, username string, requestedSubscriptio
 	}
 
 	if len(accessibleSubs) == 1 {
-		return s.buildAuthorizedResponse(&accessibleSubs[0], requestedModel, authorizedSet)
+		return s.completeSelection(ctx, &accessibleSubs[0], requestedModel, authorizedSet)
 	}
 
 	subNames := make([]string, len(accessibleSubs))
@@ -667,6 +682,66 @@ func (s *Selector) Select(groups []string, username string, requestedSubscriptio
 		subNames[i] = sub.Name
 	}
 	return nil, &MultipleSubscriptionsError{Subscriptions: subNames}
+}
+
+func (s *Selector) completeSelection(ctx context.Context, sub *subscription, requestedModel string, authorizedSet map[authpolicy.ModelKey]bool) (*SelectResponse, error) {
+	response, err := s.buildAuthorizedResponse(sub, requestedModel, authorizedSet)
+	if err != nil || requestedModel == "" || !response.AccessAllowed || s.guardrailResolver == nil {
+		return response, err
+	}
+	modelRef := findModelRef(sub, requestedModel)
+	if modelRef == nil {
+		return nil, &GuardrailResolutionError{cause: fmt.Errorf("selected model %q is not in subscription", requestedModel)}
+	}
+	model, err := s.modelByKey(modelRef.Namespace, modelRef.Name)
+	if err != nil {
+		return nil, &GuardrailResolutionError{cause: err}
+	}
+	checks, err := s.guardrailResolver.SelectedChecks(ctx, sub.Object, model)
+	if err != nil {
+		return nil, &GuardrailResolutionError{cause: err}
+	}
+	response.SelectedGuardrailChecks = &checks
+	return response, nil
+}
+
+// GuardrailResolutionError indicates that an authorized model's effective
+// guardrail selection could not be resolved.
+type GuardrailResolutionError struct {
+	cause error
+}
+
+func (e *GuardrailResolutionError) Error() string {
+	return "selected guardrails could not be resolved"
+}
+
+func (e *GuardrailResolutionError) Unwrap() error {
+	return e.cause
+}
+
+// modelByKey looks up one MaaSModelRef, using a direct cache Get when the
+// lister supports it and falling back to a List scan otherwise.
+func (s *Selector) modelByKey(namespace, name string) (*unstructured.Unstructured, error) {
+	if s.modelLister == nil {
+		return nil, errors.New("MaaSModelRef lister is not configured")
+	}
+	if getter, ok := s.modelLister.(ResourceGetter); ok {
+		item, err := getter.Get(namespace, name)
+		if err != nil {
+			return nil, fmt.Errorf("get MaaSModelRef %s/%s: %w", namespace, name, err)
+		}
+		return item, nil
+	}
+	items, err := s.modelLister.List()
+	if err != nil {
+		return nil, fmt.Errorf("list MaaSModelRefs: %w", err)
+	}
+	for _, item := range items {
+		if item.GetNamespace() == namespace && item.GetName() == name {
+			return item, nil
+		}
+	}
+	return nil, fmt.Errorf("MaaSModelRef %s/%s not found", namespace, name)
 }
 
 // SelectHighestPriority returns the accessible subscription with highest spec.priority
@@ -736,6 +811,7 @@ func (s *Selector) loadSubscriptions() ([]subscription, error) {
 			continue
 		}
 		s.enrichModelRefs(sub.ModelRefs, modelIndex)
+		sub.Object = obj
 		subscriptions = append(subscriptions, sub)
 	}
 

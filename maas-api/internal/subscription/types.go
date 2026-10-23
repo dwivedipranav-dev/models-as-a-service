@@ -71,6 +71,10 @@ type SelectResponse struct {
 	Objective string `json:"objective,omitempty"`
 	// FairnessID is the tenant name. AuthPolicy injects it as the llm-d fairness ID header.
 	FairnessID string `json:"fairnessId,omitempty"`
+	// SelectedGuardrailChecks is the sparse set of effective guardrail check IDs.
+	// When a guardrail resolver is configured, a successful model selection returns
+	// a non-nil map, including when no guardrail checks apply.
+	SelectedGuardrailChecks *map[string]bool `json:"selectedGuardrailChecks,omitempty"`
 
 	// Access control (populated from MaaSAuthPolicy check)
 	AccessAllowed bool `json:"accessAllowed"` // no omitempty — false is a meaningful denial signal

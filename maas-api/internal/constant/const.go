@@ -59,4 +59,6 @@ const (
 	RejectionUnauthorized  = "unauthorized"
 	RejectionNoCapacity    = "no-capacity"
 	RejectionQuotaExceeded = "quota-exceeded"
+	// RejectionGuardrailUnavailable covers authorized requests whose effective guardrails could not be resolved.
+	RejectionGuardrailUnavailable = "guardrail-unavailable"
 )

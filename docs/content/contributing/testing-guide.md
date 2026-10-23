@@ -58,7 +58,7 @@ Tests are organized into **xdist groups** for parallel execution. All tests in a
 | `security` | `test_negative_security.py` | Header spoofing, expired keys, cross-model access |
 | `security` | `test_namespace_scoping.py` | Namespace isolation behavior |
 | `mt_lifecycle` | `test_aitenant_lifecycle.py` | AITenant create/migrate/delete |
-| `mt_lifecycle` | `test_multi_tenant_maas_api.py` | Per-tenant Deployment, Service, HTTPRoute |
+| `mt_lifecycle` | `test_multi_tenant_maas_api.py` | Per-tenant Deployment, Service, HTTPRoute; dual-listener AuthConfig/wasm checks are `@pytest.mark.nightly` |
 | `mt_lifecycle` | `test_tenant_namespace_discovery.py` | Namespace-label discovery, webhook validation |
 | `mt_lifecycle` | `test_crd_watch_resilience.py` | Dynamic CRD watch registration (restarts controller) |
 | `tenant_isolation` | `test_tenant_auth_isolation.py` | Cross-tenant key rejection, OIDC scoping |
@@ -68,6 +68,7 @@ Tests are organized into **xdist groups** for parallel execution. All tests in a
 | `tenant_inference` | `test_tenant_model_inference.py` | Cross-gateway auth isolation and per-Gateway AuthPolicy EnvoyFilter selectors |
 | `tenant_ipp` | `test_per_tenant_ipp_isolation.py` | Per-tenant IPP stacks, routing isolation |
 | `tenant_auto_resolve` | `test_tenant_auto_resolve.py` | MaaSModelRef tenant auto-resolution from the gateway parentRef |
+| `inference_priority` | `test_inference_priority.py` | Subscription `inferencePriority`: InferenceObjective lifecycle, `flowControlStatuses`, gateway flow-control headers (`serial`; skips without the `inferenceobjectives.llm-d.ai` CRD) |
 | `external` | `test_external_oidc.py` | External OIDC token flows (skipped unless `EXTERNAL_OIDC=true`) |
 | `external` | `test_external_models.py` | ExternalModel/ExternalProvider, egress, body routing |
 

@@ -279,10 +279,10 @@ func TestEvaluatePluginsConfigMapMigration(t *testing.T) {
 
 	t.Run("absent configmap allows", func(t *testing.T) {
 		t.Parallel()
-		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		tenant := &maasv1alpha1.MaasTenantConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: maasv1alpha1.MaasTenantConfigInstanceName, Namespace: "rhoai"},
 		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tenant).Build()
 		got, err := evaluatePluginsConfigMapMigration(context.Background(), cl, params, tenant)
 		require.NoError(t, err)
 		assert.Equal(t, pluginsMigrationAllow, got.Decision)
@@ -301,10 +301,10 @@ func TestEvaluatePluginsConfigMapMigration(t *testing.T) {
 				ippProcessingConfigKey:    defaultProcessingYAML,
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 		tenant := &maasv1alpha1.MaasTenantConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: maasv1alpha1.MaasTenantConfigInstanceName, Namespace: "rhoai"},
 		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm, tenant).Build()
 		got, err := evaluatePluginsConfigMapMigration(context.Background(), cl, params, tenant)
 		require.NoError(t, err)
 		assert.Equal(t, pluginsMigrationAllow, got.Decision)
@@ -333,10 +333,10 @@ profiles:
 `,
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 		tenant := &maasv1alpha1.MaasTenantConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: maasv1alpha1.MaasTenantConfigInstanceName, Namespace: "rhoai"},
 		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm, tenant).Build()
 		got, err := evaluatePluginsConfigMapMigration(context.Background(), cl, params, tenant)
 		require.NoError(t, err)
 		assert.Equal(t, pluginsMigrationBlock, got.Decision)
@@ -364,7 +364,6 @@ profiles:
 `,
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 		tenant := &maasv1alpha1.MaasTenantConfig{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      maasv1alpha1.MaasTenantConfigInstanceName,
@@ -374,6 +373,7 @@ profiles:
 				},
 			},
 		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm, tenant).Build()
 		got, err := evaluatePluginsConfigMapMigration(context.Background(), cl, params, tenant)
 		require.NoError(t, err)
 		assert.Equal(t, pluginsMigrationAllow, got.Decision)
@@ -392,10 +392,10 @@ profiles:
 				praxisExtProcConfigKey:    "server: {}",
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 		tenant := &maasv1alpha1.MaasTenantConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: maasv1alpha1.MaasTenantConfigInstanceName, Namespace: "rhoai"},
 		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm, tenant).Build()
 		got, err := evaluatePluginsConfigMapMigration(context.Background(), cl, params, tenant)
 		require.NoError(t, err)
 		assert.Equal(t, pluginsMigrationAllow, got.Decision)
@@ -416,10 +416,10 @@ profiles:
 				ippProcessingConfigKey:    defaultProcessingYAML,
 			},
 		}
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 		tenant := &maasv1alpha1.MaasTenantConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: maasv1alpha1.MaasTenantConfigInstanceName, Namespace: "rhoai"},
 		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm, tenant).Build()
 		got, err := evaluatePluginsConfigMapMigration(context.Background(), cl, params, tenant)
 		require.NoError(t, err)
 		assert.Equal(t, pluginsMigrationBlock, got.Decision)

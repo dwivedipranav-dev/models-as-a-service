@@ -43,6 +43,9 @@ func praxisTestScheme(t *testing.T) *runtime.Scheme {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(maasv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(gwapiv1.Install(scheme))
+	scheme.AddKnownTypeWithName(externalModelGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(externalModelGVK.GroupVersion().WithKind("ExternalModelList"), &unstructured.UnstructuredList{})
+	scheme.AddKnownTypeWithName(externalProviderGVK, &unstructured.Unstructured{})
 	return scheme
 }
 
@@ -500,6 +503,17 @@ profiles:
 		"blocked migration annotation is cleared after successful cleanup")
 	// Force annotation is operator-managed and is not cleared by the controller.
 	assert.Equal(t, "true", gotTenant.Annotations[AnnotationForcePayloadProcessingMigration])
+	assert.Equal(t, APITranslationMigrationRiskForced, gotTenant.Annotations[AnnotationAPITranslationMigrationRisk])
+
+	// The accepted-risk warning must survive the one-shot ConfigMap cleanup and
+	// be present on later steady-state reconciles.
+	steadyResult, err := RunPlatform(
+		context.Background(), logr.Discard(), cl, scheme, gotTenant, platformContext,
+		platformOverlayManifestPath(t), appNs, "controller-ns", "https://kubernetes.default.svc", "opendatahub", mcfg,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, steadyResult.Warnings)
+	require.Contains(t, steadyResult.Warnings[0], "forced migration accepts compatibility loss")
 }
 
 func TestRunPlatform_PraxisMigrationCleanupSkipsPraxisOwnedResources(t *testing.T) {
