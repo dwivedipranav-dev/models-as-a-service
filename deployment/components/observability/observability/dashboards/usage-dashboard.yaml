@@ -208,8 +208,7 @@ spec:
                     kind: PrometheusDatasource
                     name: data-science-prometheus-datasource
                   query: >-
-                    round(sum by (${view_by:raw}) (increase(authorized_hits_total{user!="",
-                    user=~"$user", subscription=~"$subscription",
+                    round(sum by (${view_by:raw}) (increase(authorized_hits_total{subscription=~"$subscription",
                     model=~"$model"}[2h])))
     tokenConsumptionByUser:
       kind: Panel
@@ -419,7 +418,7 @@ spec:
                   datasource:
                     kind: PrometheusDatasource
                     name: data-science-prometheus-datasource
-                  query: 'sum(increase(authorized_hits_total{user!="", user=~"$user", subscription=~"$subscription", model=~"$model"}[$__range])) or vector(0)'
+                  query: 'sum(increase(authorized_hits_total{subscription=~"$subscription", model=~"$model"}[$__range])) or vector(0)'
                   seriesNameFormat: Tokens
   variables:
     - kind: ListVariable
